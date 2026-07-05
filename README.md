@@ -72,6 +72,11 @@ The engine features two distinct modes of transformation which can be combined (
 *   **Register Randomizer**: Dynamically re-maps general-purpose register usage while adhering to strict architecture constraints:
     *   *Calling Convention Safe*: Preserves caller/callee boundary registers `RAX/EAX` (return values), `RCX/ECX, RDX/EDX, R8, R9` (arguments), `RSP/ESP, RBP/EBP` (stack frames), and `R12, R13` (special SIB addresses).
     *   *Partitioned Shuffle*: Safely shuffles registers only within legacy (`RBX, RSI, RDI`) and extension (`R10, R11, R14, R15`) groups, guaranteeing that instruction lengths and REX prefix status remain completely invariant.
+    *   *Dynamic Implicit-Register Scan*: Decodes instruction operands to automatically detect and exclude implicit registers (e.g., EAX/EDX in division, or ESI/EDI/RSI/RDI in string operations) to prevent semantic corruption.
+    *   *RIP-Relative Safe-guard*: Automatically bypasses register randomization on instructions containing RIP-relative or EIP-relative displacement addressing to maintain correct relative memory references.
+*   **Import Obfuscation**: Erases the original Import Address Table (IAT) names and replaces them with dynamically generated import resolution stubs:
+    *   *x86 targets*: Walks the 32-bit PEB loader lists via `FS:[0x30]` to locate module bases and resolves API addresses at runtime using `ROR13` hashing.
+    *   *x64 targets*: Walk the 64-bit PEB via `GS:[0x60]`, implements full Microsoft x64 calling conventions with 32-byte stack shadow space allocation, and utilizes RIP-relative addressing to locate string table offsets.
 *   **Exception Directory Relocation**: Automatically parses x64 `.pdata` runtime function tables and `UNWIND_INFO` structures to relocate 32-bit exception handler RVAs when shuffling or renaming PE sections.
 *   **Code Reordering (x86/x64)**: Partitions code into basic blocks, shuffles their location, and maintains original execution flow by stitching blocks together with JMP instructions. Zydis is used to parse branch offsets and relative memory displacements to patch targets.
 *   **Junk Code Inserter (x86/x64)**: Inserts context-aware, benign junk instructions (e.g., flag-safe operations) to modify byte signatures without changing execution behavior. Filters out x86-only instructions on x64.

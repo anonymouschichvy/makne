@@ -2,6 +2,7 @@
 #include "RegisterRandomizer.h"
 #include <algorithm>
 #include <map>
+#include <set>
 #include <vector>
 #include <Zydis/Decoder.h>
 #include <Zydis/Register.h>
@@ -18,23 +19,22 @@ RegisterRandomizer::RegisterRandomizer(CryptoRandom& rng)
 void RegisterRandomizer::Set64Bit(bool enable) {
     m_is64Bit = enable;
     if (m_is64Bit) {
-        // Exclude RSI/RDI because of implicit string instruction operands (movsb/stosb/etc.)
         m_allowedIds = {
-            ZYDIS_REGISTER_RBX,
-            ZYDIS_REGISTER_R10, ZYDIS_REGISTER_R11, ZYDIS_REGISTER_R14, ZYDIS_REGISTER_R15
+            ZYDIS_REGISTER_RBX, ZYDIS_REGISTER_RSI, ZYDIS_REGISTER_RDI,
+            ZYDIS_REGISTER_R10, ZYDIS_REGISTER_R11, ZYDIS_REGISTER_R12,
+            ZYDIS_REGISTER_R13, ZYDIS_REGISTER_R14, ZYDIS_REGISTER_R15
         };
         m_preservedIds = {
-            ZYDIS_REGISTER_RAX, ZYDIS_REGISTER_RCX, ZYDIS_REGISTER_RDX, ZYDIS_REGISTER_RSI, ZYDIS_REGISTER_RDI,
+            ZYDIS_REGISTER_RAX, ZYDIS_REGISTER_RCX, ZYDIS_REGISTER_RDX,
             ZYDIS_REGISTER_RSP, ZYDIS_REGISTER_RBP, ZYDIS_REGISTER_R8,
-            ZYDIS_REGISTER_R9,  ZYDIS_REGISTER_R12, ZYDIS_REGISTER_R13
+            ZYDIS_REGISTER_R9
         };
     } else {
-        // Exclude ESI/EDI because of implicit string instruction operands
         m_allowedIds = {
-            ZYDIS_REGISTER_EBX
+            ZYDIS_REGISTER_EBX, ZYDIS_REGISTER_ESI, ZYDIS_REGISTER_EDI
         };
         m_preservedIds = {
-            ZYDIS_REGISTER_EAX, ZYDIS_REGISTER_ECX, ZYDIS_REGISTER_EDX, ZYDIS_REGISTER_ESI, ZYDIS_REGISTER_EDI,
+            ZYDIS_REGISTER_EAX, ZYDIS_REGISTER_ECX, ZYDIS_REGISTER_EDX,
             ZYDIS_REGISTER_ESP, ZYDIS_REGISTER_EBP
         };
     }
@@ -167,9 +167,6 @@ std::map<uint8_t, uint8_t> RegisterRandomizer::GenerateIdMapping() {
 }
 
 std::vector<uint8_t> RegisterRandomizer::Randomize(const std::vector<uint8_t>& code) {
-    auto mapping = GenerateIdMapping();
-    std::vector<uint8_t> result = code;
-    
     ZydisDecoder decoder;
     ZydisMachineMode mode = m_is64Bit ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LONG_COMPAT_32;
     ZydisStackWidth stackWidth = m_is64Bit ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32;
@@ -177,6 +174,58 @@ std::vector<uint8_t> RegisterRandomizer::Randomize(const std::vector<uint8_t>& c
     if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, mode, stackWidth))) {
         return code;
     }
+    
+    // First pass: scan for implicit registers
+    std::set<uint8_t> implicitRegs;
+    size_t scanOffset = 0;
+    while (scanOffset < code.size()) {
+        ZydisDecodedInstruction ins;
+        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+        ZyanStatus status = ZydisDecoderDecodeFull(&decoder, &code[scanOffset], code.size() - scanOffset, &ins, operands);
+        if (!ZYAN_SUCCESS(status)) {
+            scanOffset++;
+            continue;
+        }
+        
+        for (int opIdx = 0; opIdx < ins.operand_count; ++opIdx) {
+            auto& op = operands[opIdx];
+            if (op.visibility == ZYDIS_OPERAND_VISIBILITY_IMPLICIT) {
+                if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                    ZydisRegister baseReg = ZydisRegisterGetLargestEnclosing(mode, op.reg.value);
+                    if (baseReg == ZYDIS_REGISTER_NONE) baseReg = op.reg.value;
+                    implicitRegs.insert(static_cast<uint8_t>(baseReg));
+                } else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+                    if (op.mem.base != ZYDIS_REGISTER_NONE) {
+                        ZydisRegister baseReg = ZydisRegisterGetLargestEnclosing(mode, op.mem.base);
+                        if (baseReg == ZYDIS_REGISTER_NONE) baseReg = op.mem.base;
+                        implicitRegs.insert(static_cast<uint8_t>(baseReg));
+                    }
+                    if (op.mem.index != ZYDIS_REGISTER_NONE) {
+                        ZydisRegister baseReg = ZydisRegisterGetLargestEnclosing(mode, op.mem.index);
+                        if (baseReg == ZYDIS_REGISTER_NONE) baseReg = op.mem.index;
+                        implicitRegs.insert(static_cast<uint8_t>(baseReg));
+                    }
+                }
+            }
+        }
+        scanOffset += ins.length;
+    }
+    
+    // Dynamically filter m_allowedIds to exclude implicit registers
+    std::vector<uint8_t> finalAllowed;
+    for (uint8_t id : m_allowedIds) {
+        if (implicitRegs.count(id)) {
+            if (std::find(m_preservedIds.begin(), m_preservedIds.end(), id) == m_preservedIds.end()) {
+                m_preservedIds.push_back(id);
+            }
+        } else {
+            finalAllowed.push_back(id);
+        }
+    }
+    m_allowedIds = finalAllowed;
+    
+    auto mapping = GenerateIdMapping();
+    std::vector<uint8_t> result = code;
     
     size_t offset = 0;
     ZydisDecodedInstruction ins;
@@ -189,6 +238,19 @@ std::vector<uint8_t> RegisterRandomizer::Randomize(const std::vector<uint8_t>& c
             continue;
         }
         
+        // Skip RIP-relative instructions to avoid corrupting displacement addressing
+        bool hasRipRelative = false;
+        for (int opIdx = 0; opIdx < ins.operand_count; ++opIdx) {
+            if (operands[opIdx].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                (operands[opIdx].mem.base == ZYDIS_REGISTER_RIP || operands[opIdx].mem.base == ZYDIS_REGISTER_EIP)) {
+                hasRipRelative = true;
+                break;
+            }
+        }
+        if (hasRipRelative) {
+            offset += ins.length;
+            continue;
+        }
         
         // Loop through decoded operands to find registers
         for (int opIdx = 0; opIdx < ins.operand_count; ++opIdx) {

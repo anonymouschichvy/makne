@@ -30,7 +30,7 @@ jobs:
         env:
           CIBW_BUILD_FRONTEND: "build"
           # Skip 32-bit builds on Linux/macOS/Windows, build only 64-bit to align with Zydis/PE architecture support
-          CIBW_SKIP: "*-manylinux_i686 *-musllinux_i686 *-win32 cp36-* cp37-* pp*"
+          CIBW_SKIP: "*-manylinux_i686 *-musllinux_i686 cp36-* cp37-* pp*"
           CIBW_ENVIRONMENT: "BUILD_PYTHON_PACKAGE=ON"
 
       - name: Upload wheels as artifacts

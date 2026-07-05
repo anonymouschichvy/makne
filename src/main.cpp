@@ -34,7 +34,7 @@ void PrintBanner() {
     "      ██║╚██╔╝██║██╔══██║██╔═██╗ ██║╚██╗██║██╔══╝  \n"
     "      ██║ ╚═╝ ██║██║  ██║██║  ██╗██║ ╚████║███████╗ \n"
     "      ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝ \n"
-    "     Advanced Polymorphic & Metamorphic Engine v1.1\n" << std::endl;
+    "     Advanced Polymorphic & Metamorphic Engine v2.0\n" << std::endl;
 }
 
 void PrintUsage(const char* program) {

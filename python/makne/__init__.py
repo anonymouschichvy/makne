@@ -3,7 +3,7 @@ import pathlib
 import sys
 from typing import List
 
-__version__ = "1.1"
+__version__ = "2.0"
 
 def get_executable_path() -> pathlib.Path:
     pkg_dir = pathlib.Path(__file__).parent.resolve()

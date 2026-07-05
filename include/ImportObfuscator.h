@@ -55,6 +55,7 @@ private:
     bool m_dynamicLoad;
     bool m_stolenImports;
     bool m_antiDebug;
+    bool m_is64Bit;
     
     std::function<uint32_t(const std::string&, const std::string&)> m_customResolver;
     
