@@ -1,6 +1,16 @@
-<p align="center">
-  <img src="docs/logo.png" alt="MAKNE" width="100%">
-</p>
+<div align="center">
+
+```text
+███╗   ███╗ █████╗ ██╗  ██╗███╗   ██╗███████╗
+████╗ ████║██╔══██╗██║ ██╔╝████╗  ██║██╔════╝
+██╔████╔██║███████║█████╔╝ ██╔██╗ ██║█████╗
+██║╚██╔╝██║██╔══██║██╔═██╗ ██║╚██╗██║██╔══╝
+██║ ╚═╝ ██║██║  ██║██║  ██╗██║ ╚████║███████╗
+╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝
+```
+[![Publish to PyPI and GitHub Releases](https://github.com/anonymouschichvy/makne/actions/workflows/publish.yml/badge.svg)](https://github.com/anonymouschichvy/makne/actions/workflows/publish.yml) [![PyPI version](https://img.shields.io/pypi/v/makne.svg)](https://pypi.org/project/makne/) [![Python Versions](https://img.shields.io/pypi/pyversions/makne.svg)](https://pypi.org/project/makne/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT) [![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey.svg)](https://github.com/anonymouschichvy/makne)
+
+</div>
 
 An advanced binary-level mutation and obfuscation framework for **PE (Portable Executable) both 32-bit (x86) and 64-bit (x64)** binaries written in C++17. Leveraging the high-performance **Zydis disassembler** backend, the engine dynamically parses PE files, identifies instruction/basic block boundaries, applies polymorphic and metamorphic transformation passes, and rebuilds the executable with modified section structures and updated PE metadata.
 
@@ -89,11 +99,12 @@ You can build and install the project directly as a Python package. The PEP 517 
 
 #### 1. Prerequisites
 Ensure you have a C++17 compiler (MSVC on Windows, GCC on Linux, Clang on macOS) and CMake installed.
+```bash
+pip install makne
+```
 
 #### 2. Install from PyPI (Production)
-
-> **Coming Soon**
-> `makne` is not yet available on PyPI. It will be published after the initial production release.
+''
 
 #### 3. Install from Source (Local Development)
 Clone the repository and run:
