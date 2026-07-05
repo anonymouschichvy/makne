@@ -71,6 +71,7 @@ target_link_libraries(makne PRIVATE Zydis)
 # Compiler-specific settings
 if(MSVC)
     target_compile_options(makne PRIVATE /W4 /WX- /Od /EHsc)
+    target_compile_definitions(makne PRIVATE NOMINMAX)
 else()
     target_compile_options(makne PRIVATE -Wall -Wextra -O2)
 endif()

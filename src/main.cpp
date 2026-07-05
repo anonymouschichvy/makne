@@ -18,6 +18,7 @@
 #include <memory>
 
 #ifdef _WIN32
+// Disable windows.h min/max macros to avoid conflict with std::min/std::max
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
