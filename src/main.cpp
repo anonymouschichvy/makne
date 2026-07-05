@@ -18,6 +18,9 @@
 #include <memory>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -199,7 +202,7 @@ int main(int argc, char* argv[]) {
             }
 
             auto& rawBinary = polyEngine.GetRawBinary();
-            auto& sections = polyEngine.GetSections();
+            auto& peSections = polyEngine.GetSections();
 
             Polymorphic::MetamorphicEngine metaEngine(rng);
             metaEngine.Set64Bit(polyEngine.Is64Bit());
@@ -212,8 +215,8 @@ int main(int argc, char* argv[]) {
             metaEngine.EnableBranchPrediction(level >= 3);
 
             uint32_t fileAlign = polyEngine.GetFileAlignment();
-            for (size_t i = 0; i < sections.size(); ++i) {
-                auto* section = sections[i];
+            for (size_t i = 0; i < peSections.size(); ++i) {
+                auto* section = peSections[i];
                 if (section->Characteristics & 0x20000000) { // Executable
                     size_t start = section->PointerToRawData;
                     size_t size = section->SizeOfRawData;
@@ -234,7 +237,7 @@ int main(int argc, char* argv[]) {
                         
                         // Shift physical offsets of all sections starting after this one in the file
                         // we do this BEFORE insert while the pointers are valid!
-                        for (auto* sec : sections) {
+                        for (auto* sec : peSections) {
                             if (sec->PointerToRawData > start) {
                                 sec->PointerToRawData += diff;
                             }
@@ -251,8 +254,8 @@ int main(int argc, char* argv[]) {
                         rawBinary.insert(rawBinary.begin() + start + alignedCapacity, diff, 0);
                         
                         polyEngine.ParsePE(); // Re-parse PE headers to update pointers inside rawBinary
-                        sections = polyEngine.GetSections();
-                        section = sections[i];
+                        peSections = polyEngine.GetSections();
+                        section = peSections[i];
                     }
                     
                     // Pad metamorphic code to match the raw section size
