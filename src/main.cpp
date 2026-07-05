@@ -1,3 +1,15 @@
+// Disable windows.h min/max macros BEFORE any includes to prevent
+// transitive inclusion of windows.h from defining min/max macros.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include "PolymorphicEngine.h"
 #include "InstructionSubstitutor.h"
 #include "RegisterRandomizer.h"
@@ -16,14 +28,6 @@
 #include <string>
 #include <vector>
 #include <memory>
-
-#ifdef _WIN32
-// Disable windows.h min/max macros to avoid conflict with std::min/std::max
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 void PrintBanner() {
 #ifdef _WIN32
