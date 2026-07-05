@@ -9,7 +9,7 @@ description = "Advanced binary-level mutation and obfuscation framework for PE b
 readme = "README.md"
 requires-python = ">=3.7"
 authors = [
-    { name = "Developer" }
+    { name = "Ervin Regio" }
 ]
 classifiers = [
     "Programming Language :: C++",
