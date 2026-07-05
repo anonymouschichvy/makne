@@ -1,12 +1,12 @@
 <div align="center">
 
 ```text
-███╗   ███╗ █████╗ ██╗  ██╗███╗   ██╗███████╗
-████╗ ████║██╔══██╗██║ ██╔╝████╗  ██║██╔════╝
+  ███╗   ███╗ █████╗ ██╗  ██╗███╗   ██╗███████╗
+  ████╗ ████║██╔══██╗██║ ██╔╝████╗  ██║██╔════╝
 ██╔████╔██║███████║█████╔╝ ██╔██╗ ██║█████╗
 ██║╚██╔╝██║██╔══██║██╔═██╗ ██║╚██╗██║██╔══╝
-██║ ╚═╝ ██║██║  ██║██║  ██╗██║ ╚████║███████╗
-╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝
+  ██║ ╚═╝ ██║██║  ██║██║  ██╗██║ ╚████║███████╗
+  ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝
 ```
 [![Publish to PyPI and GitHub Releases](https://github.com/anonymouschichvy/makne/actions/workflows/publish.yml/badge.svg)](https://github.com/anonymouschichvy/makne/actions/workflows/publish.yml) [![PyPI version](https://img.shields.io/pypi/v/makne.svg)](https://pypi.org/project/makne/) [![Python Versions](https://img.shields.io/pypi/pyversions/makne.svg)](https://pypi.org/project/makne/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT) [![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey.svg)](https://github.com/anonymouschichvy/makne)
 
