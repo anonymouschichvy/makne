@@ -25,6 +25,18 @@ jobs:
         if: runner.os == 'Linux'
         uses: docker/setup-qemu-action@v3
 
+      - name: Configure signing environment (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          if ("${{ secrets.SIGNING_CERT }}" -ne "") {
+              $certBytes = [System.Convert]::FromBase64String("${{ secrets.SIGNING_CERT }}")
+              [System.IO.File]::WriteAllBytes("${{ github.workspace }}/cert.pfx", $certBytes)
+              echo "CIBW_ENVIRONMENT_WINDOWS=BUILD_PYTHON_PACKAGE=ON SIGN_BINARY=ON SIGN_CERT_PATH='${{ github.workspace }}/cert.pfx' SIGN_CERT_PASSWORD='${{ secrets.SIGNING_CERT_PASSWORD }}'" >> $env:GITHUB_ENV
+          } else {
+              echo "CIBW_ENVIRONMENT_WINDOWS=BUILD_PYTHON_PACKAGE=ON" >> $env:GITHUB_ENV
+          }
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.0
         env:

@@ -74,5 +74,20 @@ else()
     target_compile_options(makne PRIVATE -Wall -Wextra -O2)
 endif()
 
+# Code signing for Windows binary
+option(SIGN_BINARY "Sign the compiled Windows binary" OFF)
+set(SIGN_CERT_PATH "" CACHE STRING "Path to PFX certificate file")
+set(SIGN_CERT_PASSWORD "" CACHE STRING "Password for PFX certificate")
+
+if(WIN32 AND SIGN_BINARY)
+    if(NOT SIGN_CERT_PATH)
+        message(FATAL_ERROR "SIGN_BINARY is ON but SIGN_CERT_PATH is not set!")
+    endif()
+    add_custom_command(TARGET makne POST_BUILD
+        COMMAND signtool sign /f "${SIGN_CERT_PATH}" /p "${SIGN_CERT_PASSWORD}" /fd SHA256 /t http://timestamp.digicert.com $<TARGET_FILE:makne>
+        COMMENT "Signing makne executable with Authenticode certificate..."
+    )
+endif()
+
 # Install target for packaging
 install(TARGETS makne DESTINATION .)
