@@ -81,7 +81,50 @@ The engine features two distinct modes of transformation which can be combined (
 
 ## ⚙️ Compilation & Installation
 
-This project utilizes **CMake** for configuration and building. The build system automatically fetches dependencies like **Zydis disassembler** and **Zycore** via CMake's `FetchContent` module during configuration, so no manual downloading of submodules is necessary.
+This project can be compiled as a standalone C++ command-line tool, or installed as a Python package with programmatic C++ wrapper bindings.
+
+### 🐍 Python Package Installation (via pip)
+
+You can build and install the project directly as a Python package. The PEP 517 build backend (`scikit-build-core`) will automatically configure and build the C++ codebase via CMake when installing.
+
+#### 1. Prerequisites
+Ensure you have a C++17 compiler (MSVC on Windows, GCC on Linux, Clang on macOS) and CMake installed.
+
+#### 2. Install from PyPI (Production)
+
+> **Coming Soon**
+> `makne` is not yet available on PyPI. It will be published after the initial production release.
+
+#### 3. Install from Source (Local Development)
+Clone the repository and run:
+```bash
+# Editable install (recommended for developers)
+pip install -e .
+
+# Or standard local install
+pip install .
+```
+
+#### 4. Verification & Usage
+* **CLI usage**: Installing the package registers a global command-line entry point:
+  ```bash
+  makne --help
+  ```
+* **Python API usage**: You can run the obfuscator directly from Python scripts:
+  ```python
+  import makne
+
+  # Obfuscate a PE binary
+  return_code = makne.obfuscate("input.exe", "output.exe", ["--polymorphic", "--substitution"])
+  if return_code == 0:
+      print("Obfuscation successful!")
+  ```
+
+---
+
+### 🖥️ Native C++ Standalone Compilation
+
+If you prefer building a standalone native executable without Python, the build system utilizes **CMake** for configuration and building. The build system automatically fetches dependencies like **Zydis disassembler** and **Zycore** via CMake's `FetchContent` module during configuration, so no manual downloading of submodules is necessary.
 
 ### 🪟 Windows (MSVC)
 
@@ -99,13 +142,13 @@ cmake -B build -S .
 # Build the release binary
 cmake --build build --config Release
 ```
-The compiled executable `MetamorphicEngine.exe` will be located in `build/Release/`.
+The compiled executable `makne.exe` will be located in `build/Release/`.
 
 #### 3. Building via Visual Studio (IDE)
 1. Open Visual Studio.
 2. Select **Open a local folder** and choose the root directory containing `CMakeLists.txt`.
 3. Visual Studio will automatically detect and configure the CMake project.
-4. Go to the menu: **Build > Build All** (or select the `MetamorphicEngine.exe` startup item and press F5/Ctrl+F5 to build and run).
+4. Go to the menu: **Build > Build All** (or select the `makne.exe` startup item and press F5/Ctrl+F5 to build and run).
 
 ---
 
@@ -137,7 +180,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 # Build the project
 cmake --build build
 ```
-The compiled executable `MetamorphicEngine` will be located in `build/`.
+The compiled executable `makne` will be located in `build/`.
 
 ---
 
@@ -167,7 +210,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 # Build the project
 cmake --build build
 ```
-The compiled executable `MetamorphicEngine` will be located in `build/`.
+The compiled executable `makne` will be located in `build/`.
 
 ---
 
@@ -212,11 +255,11 @@ graph TD
 ### Usage syntax:
 * **Windows (PowerShell/CMD)**:
   ```powershell
-  .\MetamorphicEngine.exe <input.exe> <output.exe> [options]
+  .\makne.exe <input.exe> <output.exe> [options]
   ```
 * **Linux / macOS**:
   ```bash
-  ./MetamorphicEngine <input.exe> <output.exe> [options]
+  ./makne <input.exe> <output.exe> [options]
   ```
 
 ### CLI Command Options
@@ -254,22 +297,22 @@ Below are examples of how to run the engine. Make sure to run them from the dire
 Verify the installation and see the full list of supported parameters.
 * **Windows (PowerShell)**:
   ```powershell
-  .\MetamorphicEngine.exe --help
+  .\makne.exe --help
   ```
 * **Linux / macOS**:
   ```bash
-  ./MetamorphicEngine --help
+  ./makne --help
   ```
 
 #### 2. Standard Polymorphic Obfuscation
 Applies instruction substitutions, register randomization, code reordering, and section name/layout randomization.
 * **Windows (PowerShell)**:
   ```powershell
-  .\MetamorphicEngine.exe input.exe output.exe --polymorphic --substitution --registers --reorder --sections
+  .\makne.exe input.exe output.exe --polymorphic --substitution --registers --reorder --sections
   ```
 * **Linux / macOS**:
   ```bash
-  ./MetamorphicEngine input.exe output.exe --polymorphic --substitution --registers --reorder --sections
+  ./makne input.exe output.exe --polymorphic --substitution --registers --reorder --sections
   ```
 * **Explanation of flags**:
   * `--polymorphic`: Activates the polymorphic transformation pipeline.
@@ -282,11 +325,11 @@ Applies instruction substitutions, register randomization, code reordering, and 
 Applies aggressive code expansion, high complexity instruction permutations, loop unrolling, and function inlining.
 * **Windows (PowerShell)**:
   ```powershell
-  .\MetamorphicEngine.exe input.exe output.exe --metamorphic --permute 5 --expand 4 --unroll --inline
+  .\makne.exe input.exe output.exe --metamorphic --permute 5 --expand 4 --unroll --inline
   ```
 * **Linux / macOS**:
   ```bash
-  ./MetamorphicEngine input.exe output.exe --metamorphic --permute 5 --expand 4 --unroll --inline
+  ./makne input.exe output.exe --metamorphic --permute 5 --expand 4 --unroll --inline
   ```
 * **Explanation of flags**:
   * `--metamorphic`: Activates the metamorphic transformation pipeline.
@@ -299,11 +342,11 @@ Applies aggressive code expansion, high complexity instruction permutations, loo
 Combines all metamorphic and polymorphic features, flattens control flow, obfuscates import tables, encodes static strings, adds anti-analysis/debugger/emulation checks, and runs multiple passes.
 * **Windows (PowerShell)**:
   ```powershell
-  .\MetamorphicEngine.exe input.exe output.exe --mixed --cflow --encrypt --imports --data --antidebug --antiemu --level 5 --iterations 2
+  .\makne.exe input.exe output.exe --mixed --cflow --encrypt --imports --data --antidebug --antiemu --level 5 --iterations 2
   ```
 * **Linux / macOS**:
   ```bash
-  ./MetamorphicEngine input.exe output.exe --mixed --cflow --encrypt --imports --data --antidebug --antiemu --level 5 --iterations 2
+  ./makne input.exe output.exe --mixed --cflow --encrypt --imports --data --antidebug --antiemu --level 5 --iterations 2
   ```
 * **Explanation of flags**:
   * `--mixed`: Runs both the polymorphic and metamorphic pipelines sequentially.

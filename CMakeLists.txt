@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(MetamorphicEngine LANGUAGES CXX)
+project(makne LANGUAGES CXX)
 
 # Set C++ Standard
 set(CMAKE_CXX_STANDARD 17)
@@ -46,7 +46,7 @@ set(HEADERS
 )
 
 # Executable Target
-add_executable(MetamorphicEngine ${SOURCES} ${HEADERS})
+add_executable(makne ${SOURCES} ${HEADERS})
 
 # Fetch Zycore
 include(FetchContent)
@@ -65,11 +65,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(zydis)
 
 # Link Zydis
-target_link_libraries(MetamorphicEngine PRIVATE Zydis)
+target_link_libraries(makne PRIVATE Zydis)
 
 # Compiler-specific settings
 if(MSVC)
-    target_compile_options(MetamorphicEngine PRIVATE /W4 /WX- /Od /EHsc)
+    target_compile_options(makne PRIVATE /W4 /WX- /Od /EHsc)
 else()
-    target_compile_options(MetamorphicEngine PRIVATE -Wall -Wextra -O2)
+    target_compile_options(makne PRIVATE -Wall -Wextra -O2)
 endif()
+
+# Install target for packaging
+install(TARGETS makne DESTINATION .)
