@@ -50,6 +50,7 @@ add_executable(makne ${SOURCES} ${HEADERS})
 
 # Fetch Zycore
 include(FetchContent)
+set(ZYAN_TREAT_WARNINGS_AS_ERRORS OFF CACHE INTERNAL "")
 FetchContent_Declare(
     zycore
     URL https://github.com/zyantific/zycore-c/archive/refs/tags/v1.5.0.zip
