@@ -80,11 +80,23 @@ set(SIGN_CERT_PATH "" CACHE STRING "Path to PFX certificate file")
 set(SIGN_CERT_PASSWORD "" CACHE STRING "Password for PFX certificate")
 
 if(WIN32 AND SIGN_BINARY)
+    find_program(SIGNTOOL_EXECUTABLE signtool
+        PATHS
+            "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64"
+            "$ENV{ProgramFiles}/Windows Kits/10/bin/*/x64"
+            "C:/Program Files (x86)/Windows Kits/10/bin/*/x64"
+            "C:/Program Files/Windows Kits/10/bin/*/x64"
+    )
+    if(NOT SIGNTOOL_EXECUTABLE)
+        message(FATAL_ERROR "signtool.exe not found! Please install Windows SDK.")
+    endif()
+
     if(NOT SIGN_CERT_PATH)
         message(FATAL_ERROR "SIGN_BINARY is ON but SIGN_CERT_PATH is not set!")
     endif()
+
     add_custom_command(TARGET makne POST_BUILD
-        COMMAND signtool sign /f "${SIGN_CERT_PATH}" /p "${SIGN_CERT_PASSWORD}" /fd SHA256 /t http://timestamp.digicert.com $<TARGET_FILE:makne>
+        COMMAND "${SIGNTOOL_EXECUTABLE}" sign /f "${SIGN_CERT_PATH}" /p "${SIGN_CERT_PASSWORD}" /fd SHA256 /t http://timestamp.digicert.com $<TARGET_FILE:makne>
         COMMENT "Signing makne executable with Authenticode certificate..."
     )
 endif()
