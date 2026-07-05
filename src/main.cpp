@@ -266,7 +266,7 @@ int main(int argc, char* argv[]) {
                     
                     std::copy(code.begin(), code.end(), rawBinary.begin() + start);
                     section->SizeOfRawData = static_cast<uint32_t>(finalRawSize);
-                    section->VirtualSize = std::max(section->VirtualSize, static_cast<uint32_t>(newCodeSize));
+                    section->VirtualSize = (std::max)(section->VirtualSize, static_cast<uint32_t>(newCodeSize));
                 }
             }
             polyEngine.ParsePE(); // Trigger final re-parsing and structure validation step
