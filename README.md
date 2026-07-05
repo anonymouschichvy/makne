@@ -99,12 +99,16 @@ You can build and install the project directly as a Python package. The PEP 517 
 
 #### 1. Prerequisites
 Ensure you have a C++17 compiler (MSVC on Windows, GCC on Linux, Clang on macOS) and CMake installed.
+* **Windows Source Build Note**: If installing from source in a standard PowerShell/CMD terminal, you must specify the generator if MSVC tools are not in your path:
+  ```powershell
+  $env:CMAKE_GENERATOR="MinGW Makefiles"
+  ```
+  Alternatively, run the command inside a **Developer PowerShell for Visual Studio**.
+
+#### 2. Install from PyPI (Production)
 ```bash
 pip install makne
 ```
-
-#### 2. Install from PyPI (Production)
-''
 
 #### 3. Install from Source (Local Development)
 Clone the repository and run:
