@@ -16,7 +16,8 @@ public:
         PayloadEncryptor::Algorithm algo,
         uint32_t encryptedSectionRva,
         uint32_t encryptedSectionSize,
-        uint32_t originalEntryPoint);
+        uint32_t originalEntryPoint,
+        uint32_t stubRva);
     
     // Set polymorphism level
     void SetPolymorphismLevel(int level); // 1-5
@@ -39,7 +40,7 @@ private:
     
     // Decryptor generation methods
     std::vector<uint8_t> GenerateXORDecryptor(const std::vector<uint8_t>& key,
-        uint32_t rva, uint32_t size);
+        uint32_t rva, uint32_t size, uint32_t originalEntryPoint, uint32_t stubRva);
     std::vector<uint8_t> GenerateRC4Decryptor(const std::vector<uint8_t>& key,
         uint32_t rva, uint32_t size);
     std::vector<uint8_t> GenerateAESDecryptor(const std::vector<uint8_t>& key,
@@ -51,6 +52,7 @@ private:
     std::vector<uint8_t> GenerateXorRegReg(X86Register reg1, X86Register reg2);
     std::vector<uint8_t> GeneratePushReg(X86Register reg);
     std::vector<uint8_t> GeneratePopReg(X86Register reg);
+    std::vector<uint8_t> GenerateLeaRip(X86Register reg, int32_t displacement);
     
     // Anti-debugging code
     std::vector<uint8_t> GenerateAntiDebugCode();

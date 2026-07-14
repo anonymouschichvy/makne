@@ -523,17 +523,79 @@ std::vector<uint8_t> ImportObfuscator::GenerateDynamicResolver(
         code.push_back(0x41); code.push_back(0x56); // push r14
         code.push_back(0x41); code.push_back(0x57); // push r15
         
-        // Get kernel32 base (from x64 PEB)
+        // Get kernel32 base (from x64 PEB using InMemoryOrderModuleList name-hash walk)
         // mov rax, gs:[0x60]
         code.push_back(0x65); code.push_back(0x48); code.push_back(0x8B); code.push_back(0x04);
         code.push_back(0x25); code.push_back(0x60); code.push_back(0x00); code.push_back(0x00);
         code.push_back(0x00);
         // mov rax, [rax + 0x18]
         code.push_back(0x48); code.push_back(0x8B); code.push_back(0x40); code.push_back(0x18);
-        // mov rax, [rax + 0x30]
-        code.push_back(0x48); code.push_back(0x8B); code.push_back(0x40); code.push_back(0x30);
-        // mov rbp, [rax + 0x10]
-        code.push_back(0x48); code.push_back(0x8B); code.push_back(0x68); code.push_back(0x10);
+        // mov rax, [rax + 0x20] ; InMemoryOrderModuleList head in PEB_LDR_DATA
+        code.push_back(0x48); code.push_back(0x8B); code.push_back(0x40); code.push_back(0x20);
+        // mov r9, [rax] ; first module's InMemoryOrderLinks (Flink)
+        code.push_back(0x4C); code.push_back(0x8B); code.push_back(0x08);
+        
+        // module_loop:
+        // cmp r9, rax
+        code.push_back(0x49); code.push_back(0x39); code.push_back(0xC1);
+        // je module_not_found (offset 71)
+        code.push_back(0x74); code.push_back(0x42);
+        // mov rbp, [r9 + 0x20] (load DllBase into rbp)
+        code.push_back(0x49); code.push_back(0x8B); code.push_back(0x69); code.push_back(0x20);
+        // movzx ecx, word ptr [r9 + 0x48] (load Length)
+        code.push_back(0x41); code.push_back(0x0F); code.push_back(0xB7); code.push_back(0x49); code.push_back(0x48);
+        // mov r8, [r9 + 0x50] (load Buffer)
+        code.push_back(0x4D); code.push_back(0x8B); code.push_back(0x41); code.push_back(0x50);
+        // xor edx, edx
+        code.push_back(0x31); code.push_back(0xD2);
+        
+        // hash_char_loop:
+        // test ecx, ecx
+        code.push_back(0x85); code.push_back(0xC9);
+        // jz hash_done (offset 58)
+        code.push_back(0x74); code.push_back(0x22);
+        // movzx esi, word ptr [r8]
+        code.push_back(0x41); code.push_back(0x0F); code.push_back(0xB7); code.push_back(0x30);
+        // cmp sil, 0x61
+        code.push_back(0x40); code.push_back(0x80); code.push_back(0xFE); code.push_back(0x61);
+        // jl skip_upper (offset 44)
+        code.push_back(0x7C); code.push_back(0x0A);
+        // cmp sil, 0x7A
+        code.push_back(0x40); code.push_back(0x80); code.push_back(0xFE); code.push_back(0x7A);
+        // jg skip_upper (offset 44)
+        code.push_back(0x7F); code.push_back(0x04);
+        // sub sil, 0x20
+        code.push_back(0x40); code.push_back(0x80); code.push_back(0xEE); code.push_back(0x20);
+        
+        // skip_upper:
+        // ror edx, 13
+        code.push_back(0xC1); code.push_back(0xCA); code.push_back(0x0D);
+        // add edx, esi
+        code.push_back(0x01); code.push_back(0xF2);
+        // add r8, 2
+        code.push_back(0x49); code.push_back(0x83); code.push_back(0xC0); code.push_back(0x02);
+        // sub ecx, 2
+        code.push_back(0x83); code.push_back(0xE9); code.push_back(0x02);
+        // jmp hash_char_loop
+        code.push_back(0xEB); code.push_back(0xDA);
+        
+        // hash_done:
+        // cmp edx, 0x6E2BCA17 (precomputed hash of L"KERNEL32.DLL")
+        code.push_back(0x81); code.push_back(0xFA); code.push_back(0x17); code.push_back(0xCA); code.push_back(0x2B); code.push_back(0x6E);
+        // je found_module (offset 76)
+        code.push_back(0x74); code.push_back(0x09);
+        // mov r9, [r9]
+        code.push_back(0x4D); code.push_back(0x8B); code.push_back(0x09);
+        // jmp module_loop
+        code.push_back(0xEB); code.push_back(0xB5);
+        
+        // module_not_found:
+        // xor rbp, rbp
+        code.push_back(0x48); code.push_back(0x31); code.push_back(0xED);
+        // jmp end_search
+        code.push_back(0xEB); code.push_back(0x00);
+        
+        // found_module:
         
         // Helper to generate a relative call to hash resolver
         std::vector<size_t> callOffsetsToPatch;
@@ -694,16 +756,78 @@ std::vector<uint8_t> ImportObfuscator::GenerateDynamicResolver(
         // pushad
         code.push_back(0x60);
         
-        // Get kernel32 base (from PEB)
+        // Get kernel32 base (from PEB using InMemoryOrderModuleList name-hash walk)
         // mov eax, fs:[0x30]  ; PEB
         code.push_back(0x64); code.push_back(0xA1); code.push_back(0x30); 
         code.push_back(0x00); code.push_back(0x00); code.push_back(0x00);
         // mov eax, [eax + 0x0C]  ; PEB_LDR_DATA
         code.push_back(0x8B); code.push_back(0x40); code.push_back(0x0C);
-        // mov eax, [eax + 0x1C]  ; InInitializationOrderModuleList
-        code.push_back(0x8B); code.push_back(0x40); code.push_back(0x1C);
-        // mov ebp, [eax + 0x08]  ; kernel32 base
-        code.push_back(0x8B); code.push_back(0x68); code.push_back(0x08);
+        // mov eax, [eax + 0x14]  ; InMemoryOrderModuleList
+        code.push_back(0x8B); code.push_back(0x40); code.push_back(0x14);
+        // mov esi, [eax] ; first module's InMemoryOrderLinks (Flink)
+        code.push_back(0x8B); code.push_back(0x30);
+        
+        // module_loop:
+        // cmp esi, eax
+        code.push_back(0x3B); code.push_back(0xF0);
+        // je module_not_found (offset 61)
+        code.push_back(0x74); code.push_back(0x39);
+        // mov ebp, [esi + 0x10] (load DllBase into ebp)
+        code.push_back(0x8B); code.push_back(0x6E); code.push_back(0x10);
+        // movzx ecx, word ptr [esi + 0x24] (load Length)
+        code.push_back(0x0F); code.push_back(0xB7); code.push_back(0x4E); code.push_back(0x24);
+        // mov edi, [esi + 0x28] (load Buffer)
+        code.push_back(0x8B); code.push_back(0x7E); code.push_back(0x28);
+        // xor edx, edx
+        code.push_back(0x31); code.push_back(0xD2);
+        
+        // hash_char_loop:
+        // test ecx, ecx
+        code.push_back(0x85); code.push_back(0xC9);
+        // jz hash_done (offset 49)
+        code.push_back(0x74); code.push_back(0x1D);
+        // movzx ebx, word ptr [edi]
+        code.push_back(0x0F); code.push_back(0xB7); code.push_back(0x1F);
+        // cmp bl, 0x61
+        code.push_back(0x80); code.push_back(0xFB); code.push_back(0x61);
+        // jl skip_upper (offset 36)
+        code.push_back(0x7C); code.push_back(0x08);
+        // cmp bl, 0x7A
+        code.push_back(0x80); code.push_back(0xFB); code.push_back(0x7A);
+        // jg skip_upper (offset 36)
+        code.push_back(0x7F); code.push_back(0x03);
+        // sub bl, 0x20
+        code.push_back(0x80); code.push_back(0xEB); code.push_back(0x20);
+        
+        // skip_upper:
+        // ror edx, 13
+        code.push_back(0xC1); code.push_back(0xCA); code.push_back(0x0D);
+        // add edx, ebx
+        code.push_back(0x01); code.push_back(0xDA);
+        // add edi, 2
+        code.push_back(0x83); code.push_back(0xC7); code.push_back(0x02);
+        // sub ecx, 2
+        code.push_back(0x83); code.push_back(0xE9); code.push_back(0x02);
+        // jmp hash_char_loop
+        code.push_back(0xEB); code.push_back(0xDF);
+        
+        // hash_done:
+        // cmp edx, 0x6E2BCA17 (precomputed hash of L"KERNEL32.DLL")
+        code.push_back(0x81); code.push_back(0xFA); code.push_back(0x17); code.push_back(0xCA); code.push_back(0x2B); code.push_back(0x6E);
+        // je found_module (offset 65)
+        code.push_back(0x74); code.push_back(0x08);
+        // mov esi, [esi]
+        code.push_back(0x8B); code.push_back(0x36);
+        // jmp module_loop
+        code.push_back(0xEB); code.push_back(0xC3);
+        
+        // module_not_found:
+        // xor ebp, ebp
+        code.push_back(0x31); code.push_back(0xED);
+        // jmp end_search
+        code.push_back(0xEB); code.push_back(0x00);
+        
+        // found_module:
         
         // Resolve LoadLibraryA by hash
         // mov eax, 0x8A8B4036  ; LoadLibraryA hash

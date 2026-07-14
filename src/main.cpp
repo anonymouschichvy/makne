@@ -1,5 +1,5 @@
 // Disable windows.h min/max macros BEFORE any includes to prevent
-// transitive inclusion of windows.h from defining min/max macros.
+// transitive inclusion of windows.h from defining min/max macros. Dummy: 12345
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -42,7 +42,7 @@ void PrintBanner() {
     "      ██║╚██╔╝██║██╔══██║██╔═██╗ ██║╚██╗██║██╔══╝  \n"
     "      ██║ ╚═╝ ██║██║  ██║██║  ██╗██║ ╚████║███████╗ \n"
     "      ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝ \n"
-    "     Advanced Polymorphic & Metamorphic Engine v2.0\n" << std::endl;
+    "     Advanced Polymorphic & Metamorphic Engine v3.0\n" << std::endl;
 }
 
 void PrintUsage(const char* program) {
@@ -165,9 +165,10 @@ int main(int argc, char* argv[]) {
     for (int pass = 0; pass < iterations; ++pass) {
         std::cout << "[*] Transformation pass " << (pass + 1) << "/" << iterations << std::endl;
 
+        Polymorphic::PolymorphicEngine polyEngine;
+        
+        // Configure polymorphic options
         if (mode == Mode::POLYMORPHIC || mode == Mode::MIXED) {
-            std::cout << "  [+] Running Polymorphic Engine..." << std::endl;
-            Polymorphic::PolymorphicEngine polyEngine;
             polyEngine.SetInstructionSubstitution(substitution);
             polyEngine.SetRegisterRandomization(registers);
             polyEngine.SetCodeReordering(reorder);
@@ -177,110 +178,48 @@ int main(int argc, char* argv[]) {
             polyEngine.SetDataEncoding(data);
             polyEngine.SetSectionRandomization(sections);
             polyEngine.SetImportObfuscation(imports);
-            polyEngine.SetAntiDebug(antiDebug);
-
-            if (!polyEngine.LoadExecutable(currentInput)) {
-                std::cerr << "[!] Failed to load and parse input executable: " << currentInput << std::endl;
-                return 1;
-            }
-
-            if (!polyEngine.Process()) {
-                std::cerr << "[!] Polymorphic processing failed on pass " << (pass + 1) << std::endl;
-                return 1;
-            }
-
-            if (!polyEngine.SaveExecutable(outputFile)) {
-                std::cerr << "[!] Failed to save modified executable: " << outputFile << std::endl;
-                return 1;
-            }
-
-            currentInput = outputFile;
+        } else {
+            polyEngine.SetInstructionSubstitution(false);
+            polyEngine.SetRegisterRandomization(false);
+            polyEngine.SetCodeReordering(false);
+            polyEngine.SetJunkCodeInsertion(false);
+            polyEngine.SetControlFlowObfuscation(false);
+            polyEngine.SetPayloadEncryption(false);
+            polyEngine.SetDataEncoding(false);
+            polyEngine.SetSectionRandomization(false);
+            polyEngine.SetImportObfuscation(false);
         }
+        
+        polyEngine.SetAntiDebug(antiDebug);
 
+        // Configure metamorphic options
         if (mode == Mode::METAMORPHIC || mode == Mode::MIXED) {
-            std::cout << "  [+] Applying metamorphic transformation..." << std::endl;
-
-            Polymorphic::PolymorphicEngine polyEngine;
-            if (!polyEngine.LoadExecutable(currentInput)) {
-                std::cerr << "[!] Failed to load executable for metamorphic pass: " << currentInput << std::endl;
-                return 1;
-            }
-
-            auto& rawBinary = polyEngine.GetRawBinary();
-            auto& peSections = polyEngine.GetSections();
-
-            Polymorphic::MetamorphicEngine metaEngine(rng);
-            metaEngine.Set64Bit(polyEngine.Is64Bit());
-            metaEngine.SetPermutationLevel(permuteLevel);
-            metaEngine.SetExpansionLevel(expandLevel);
-            metaEngine.setGarbageLevel(garbageLevel);
-            metaEngine.EnableLoopUnrolling(unroll);
-            metaEngine.EnableFunctionInlining(inlining);
-            metaEngine.EnableOpaquePredicates(level >= 4);
-            metaEngine.EnableBranchPrediction(level >= 3);
-
-            uint32_t fileAlign = polyEngine.GetFileAlignment();
-            for (size_t i = 0; i < peSections.size(); ++i) {
-                auto* section = peSections[i];
-                if (section->Characteristics & 0x20000000) { // Executable
-                    size_t start = section->PointerToRawData;
-                    size_t size = section->SizeOfRawData;
-
-                    std::vector<uint8_t> code(rawBinary.begin() + start, rawBinary.begin() + start + size);
-                    metaEngine.Transform(code, static_cast<uint32_t>(section->VirtualAddress));
-                    
-                    size_t newCodeSize = code.size();
-                    size_t newAlignedSize = (newCodeSize + fileAlign - 1) & ~(fileAlign - 1);
-                    
-                    size_t alignedCapacity = (size + fileAlign - 1) & ~(fileAlign - 1);
-                    if (alignedCapacity == 0) alignedCapacity = fileAlign;
-
-                    size_t finalRawSize = alignedCapacity;
-                    if (newCodeSize > alignedCapacity) {
-                        finalRawSize = newAlignedSize;
-                        uint32_t diff = static_cast<uint32_t>(newAlignedSize - alignedCapacity);
-                        
-                        // Shift physical offsets of all sections starting after this one in the file
-                        // we do this BEFORE insert while the pointers are valid!
-                        for (auto* sec : peSections) {
-                            if (sec->PointerToRawData > start) {
-                                sec->PointerToRawData += diff;
-                            }
-                        }
-                        
-                        // Shift the symbol table offset if it is after the modified section
-                        Polymorphic::IMAGE_FILE_HEADER* fileHeader = reinterpret_cast<Polymorphic::IMAGE_FILE_HEADER*>(
-                            rawBinary.data() + reinterpret_cast<Polymorphic::IMAGE_DOS_HEADER*>(rawBinary.data())->e_lfanew + 4);
-                        if (fileHeader->PointerToSymbolTable > start) {
-                            fileHeader->PointerToSymbolTable += diff;
-                        }
-                        
-                        // Now insert the bytes (reallocates rawBinary buffer)
-                        rawBinary.insert(rawBinary.begin() + start + alignedCapacity, diff, 0);
-                        
-                        polyEngine.ParsePE(); // Re-parse PE headers to update pointers inside rawBinary
-                        peSections = polyEngine.GetSections();
-                        section = peSections[i];
-                    }
-                    
-                    // Pad metamorphic code to match the raw section size
-                    if (code.size() < finalRawSize) {
-                        code.resize(finalRawSize, 0x90); // pad with NOPs
-                    }
-                    
-                    std::copy(code.begin(), code.end(), rawBinary.begin() + start);
-                    section->SizeOfRawData = static_cast<uint32_t>(finalRawSize);
-                    section->VirtualSize = (std::max)(section->VirtualSize, static_cast<uint32_t>(newCodeSize));
-                }
-            }
-            polyEngine.ParsePE(); // Trigger final re-parsing and structure validation step
-
-            if (!polyEngine.SaveExecutable(outputFile)) {
-                std::cerr << "[!] Failed to save metamorphic output: " << outputFile << std::endl;
-                return 1;
-            }
-            currentInput = outputFile;
+            polyEngine.SetMetamorphic(true);
+            polyEngine.SetPermutationLevel(permuteLevel);
+            polyEngine.SetExpansionLevel(expandLevel);
+            polyEngine.SetGarbageLevel(garbageLevel);
+            polyEngine.EnableLoopUnrolling(unroll);
+            polyEngine.EnableFunctionInlining(inlining);
+        } else {
+            polyEngine.SetMetamorphic(false);
         }
+
+        if (!polyEngine.LoadExecutable(currentInput)) {
+            std::cerr << "[!] Failed to load and parse input executable: " << currentInput << std::endl;
+            return 1;
+        }
+
+        if (!polyEngine.Process()) {
+            std::cerr << "[!] Obfuscation processing failed on pass " << (pass + 1) << std::endl;
+            return 1;
+        }
+
+        if (!polyEngine.SaveExecutable(outputFile)) {
+            std::cerr << "[!] Failed to save modified executable: " << outputFile << std::endl;
+            return 1;
+        }
+
+        currentInput = outputFile;
     }
 
     std::cout << "[+] Transformation complete!" << std::endl;

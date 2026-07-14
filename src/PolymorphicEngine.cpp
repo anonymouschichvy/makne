@@ -4,8 +4,16 @@
 #include "DataEncoder.h"
 #include "SectionRandomizer.h"
 #include "ImportObfuscator.h"
+#include "PayloadEncryptor.h"
+#include "DecryptorGenerator.h"
+#include "InstructionSubstitutor.h"
+#include "JunkCodeInserter.h"
+#include "ControlFlowObfuscator.h"
+#include "CodeReorderer.h"
+#include "MetamorphicEngine.h"
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <algorithm>
 #include <cstring>
 #include <numeric>
@@ -201,6 +209,7 @@ namespace Polymorphic {
         void EncodeDataSections(std::vector<uint8_t>& data);
         void RandomizeSectionLayout();
         void ObfuscateImports();
+        bool EncryptPayload();
 
     private:
         PolymorphicEngine* m_engine;
@@ -285,7 +294,7 @@ namespace Polymorphic {
     }
 
     void PolymorphicEngine::Impl::ApplyRegisterRandomization(std::vector<uint8_t>& code) {
-        RegisterRandomizer randomizer(*m_rng);
+        RegisterRandomizerCore randomizer(*m_rng);
         randomizer.Set64Bit(m_engine->Is64Bit());
         code = randomizer.Randomize(code);
     }
@@ -710,6 +719,121 @@ namespace Polymorphic {
         obfuscator.Obfuscate(m_engine->m_rawBinary);
     }
 
+    bool PolymorphicEngine::Impl::EncryptPayload() {
+        if (!m_engine->m_encryptPayload) return true;
+        
+        IMAGE_SECTION_HEADER* targetSec = nullptr;
+        for (auto* sec : m_engine->m_sections) {
+            if (sec->Characteristics & 0x20000000) {
+                targetSec = sec;
+                break;
+            }
+        }
+        if (!targetSec) return true;
+        
+        PayloadEncryptor encryptor(*m_rng);
+        encryptor.SetAlgorithm(PayloadEncryptor::Algorithm::XOR);
+        encryptor.SetKeySize(16);
+        
+        std::vector<uint8_t> originalCode(
+            m_engine->m_rawBinary.begin() + targetSec->PointerToRawData,
+            m_engine->m_rawBinary.begin() + targetSec->PointerToRawData + targetSec->SizeOfRawData
+        );
+        
+        auto encResult = encryptor.Encrypt(originalCode, targetSec->VirtualAddress);
+        
+        std::copy(encResult.encryptedData.begin(), encResult.encryptedData.end(),
+            m_engine->m_rawBinary.begin() + targetSec->PointerToRawData);
+            
+        targetSec->Characteristics |= 0x80000000;
+        
+        DecryptorGenerator generator(*m_rng);
+        generator.SetIs64Bit(m_engine->m_is64Bit);
+        
+        uint32_t originalEntryPoint = m_engine->m_is64Bit ?
+            (m_engine->m_optionalHeader64 ? m_engine->m_optionalHeader64->AddressOfEntryPoint : 0) :
+            (m_engine->m_optionalHeader32 ? m_engine->m_optionalHeader32->AddressOfEntryPoint : 0);
+            
+        IMAGE_SECTION_HEADER* lastSec = m_engine->m_sections.back();
+        uint32_t secAlign = m_engine->m_is64Bit ? 
+            m_engine->m_optionalHeader64->SectionAlignment : m_engine->m_optionalHeader32->SectionAlignment;
+        uint32_t fileAlign = m_engine->m_is64Bit ? 
+            m_engine->m_optionalHeader64->FileAlignment : m_engine->m_optionalHeader32->FileAlignment;
+        // Cache section fields NOW before any resize that could reallocate the vector
+        // and invalidate targetSec / lastSec pointers.
+        uint32_t targetSecRva       = targetSec->VirtualAddress;
+        uint32_t targetSecRawSize   = targetSec->SizeOfRawData;
+        uint32_t lastSecVA          = lastSec->VirtualAddress;
+        uint32_t lastSecVSize       = lastSec->VirtualSize;
+        uint32_t lastSecRawPtr      = lastSec->PointerToRawData;
+        uint32_t lastSecRawSize     = lastSec->SizeOfRawData;
+
+        // Place stub IMMEDIATELY after the last section's existing raw data.
+        // This keeps the file-to-virtual mapping consistent within the section:
+        //   file[PointerToRawData + X]  <-->  VA[VirtualAddress + X]
+        uint32_t lastSecRawEnd   = lastSecRawPtr + lastSecRawSize;
+        uint32_t stubFileOffset  = (lastSecRawEnd + fileAlign - 1) & ~(fileAlign - 1);
+        // stubRva must satisfy: stubRva - lastSecVA == stubFileOffset - lastSecRawPtr
+        uint32_t stubRva = lastSecVA + (stubFileOffset - lastSecRawPtr);
+
+        // Pad raw binary up to stubFileOffset (may reallocate the vector)
+        m_engine->m_rawBinary.resize(stubFileOffset, 0x00);
+
+        auto stub = generator.Generate(
+            encResult.key,
+            PayloadEncryptor::Algorithm::XOR,
+            targetSecRva,
+            targetSecRawSize,
+            originalEntryPoint,
+            stubRva
+        );
+
+        // Append stub
+        m_engine->m_rawBinary.insert(m_engine->m_rawBinary.end(), stub.begin(), stub.end());
+
+        // Align file end
+        uint32_t stubRawSize = static_cast<uint32_t>((stub.size() + fileAlign - 1) & ~(fileAlign - 1));
+        m_engine->m_rawBinary.resize(stubFileOffset + stubRawSize, 0x00);
+
+        // Refresh all pointers after reallocation
+        m_engine->ParsePE();
+        lastSec = m_engine->m_sections.back();
+
+        // Expand the last section to cover stub bytes
+        uint32_t newRawSize = stubFileOffset - lastSecRawPtr + stubRawSize;
+        uint32_t newVSize   = stubRva - lastSecVA + static_cast<uint32_t>(stub.size());
+        lastSec->VirtualSize    = newVSize;
+        lastSec->SizeOfRawData  = newRawSize;
+        lastSec->Characteristics |= 0xE0000020; // CODE | EXECUTE | READ | WRITE
+
+        // Update Optional Header
+        m_engine->ParsePE();
+        lastSec = m_engine->m_sections.back();
+
+        uint32_t newSizeOfImage = (lastSec->VirtualAddress + lastSec->VirtualSize + secAlign - 1) & ~(secAlign - 1);
+
+        if (m_engine->m_is64Bit) {
+            m_engine->m_optionalHeader64->SizeOfImage = newSizeOfImage;
+            m_engine->m_optionalHeader64->AddressOfEntryPoint = stubRva;
+            m_engine->m_optionalHeader64->DllCharacteristics &= ~0x0040u; // Clear DYNAMIC_BASE
+            m_engine->m_optionalHeader64->DataDirectory[9].VirtualAddress = 0; // Clear TLS
+            m_engine->m_optionalHeader64->DataDirectory[9].Size = 0;
+        } else {
+            m_engine->m_optionalHeader32->SizeOfImage = newSizeOfImage;
+            m_engine->m_optionalHeader32->AddressOfEntryPoint = stubRva;
+            m_engine->m_optionalHeader32->DllCharacteristics &= ~0x0040u; // Clear DYNAMIC_BASE
+            m_engine->m_optionalHeader32->DataDirectory[9].VirtualAddress = 0; // Clear TLS
+            m_engine->m_optionalHeader32->DataDirectory[9].Size = 0;
+        }
+
+        std::cout << "[DEBUG] EncryptPayload: stubRva=0x" << std::hex << stubRva
+                  << " fileOff=0x" << stubFileOffset
+                  << " stubSize=" << std::dec << stub.size()
+                  << " origEP=0x" << std::hex << originalEntryPoint << std::dec << std::endl;
+
+        return true;
+    }
+
     // (Pattern matching and manual substitution helpers removed in favor of Zydis disassembler backend)
 
     // ============ Main Engine Methods ============
@@ -730,6 +854,12 @@ namespace Polymorphic {
         , m_randomizeSections(true)
         , m_obfuscateImports(true)
         , m_antiDebug(false)
+        , m_isMetamorphic(false)
+        , m_permuteLevel(3)
+        , m_expandLevel(2)
+        , m_garbageLevel(2)
+        , m_unrollLoops(false)
+        , m_inlineFunctions(false)
         , m_impl(std::make_unique<Impl>(this)) {
     }
 
@@ -839,35 +969,484 @@ namespace Polymorphic {
             std::vector<uint8_t> code(m_rawBinary.begin() + start,
                 m_rawBinary.begin() + start + size);
 
+            // Use pure RVA (no ImageBase) for instruction addresses so that rvaMap,
+            // branch_target_rva, and MapRVA callers (entryPoint, pdata, reloc) are all
+            // in the same RVA coordinate space.
             uint64_t baseAddress = section->VirtualAddress;
-            if (m_is64Bit) {
-                baseAddress += m_optionalHeader64 ? m_optionalHeader64->ImageBase : 0x140000000;
-            } else {
-                baseAddress += m_optionalHeader32 ? m_optionalHeader32->ImageBase : 0x400000;
+            uint64_t imageBase = m_is64Bit ?
+                (m_optionalHeader64 ? m_optionalHeader64->ImageBase : 0x140000000ULL) :
+                (m_optionalHeader32 ? m_optionalHeader32->ImageBase : 0x400000ULL);
+
+            // Initialize ArchContext early
+            ArchContext ctx;
+            ctx.is64Bit = m_is64Bit;
+            ctx.imageBase = imageBase;
+            ctx.sectionAlignment = m_is64Bit ? 
+                (m_optionalHeader64 ? m_optionalHeader64->SectionAlignment : 0x1000) :
+                (m_optionalHeader32 ? m_optionalHeader32->SectionAlignment : 0x1000);
+            ctx.fileAlignment = GetFileAlignment();
+            ctx.maxRawSize = size;
+            if (m_isMetamorphic) {
+                if (size > 0x2000) {
+                    ctx.maxRawSize = size - 0x2000;
+                } else {
+                    ctx.maxRawSize = size * 3 / 4;
+                }
+            }
+            
+            // Populate function boundaries from .pdata before disassembling
+            if (m_is64Bit && m_optionalHeader64) {
+                uint32_t pdataRva = m_optionalHeader64->DataDirectory[3].VirtualAddress;
+                uint32_t pdataSize = m_optionalHeader64->DataDirectory[3].Size;
+                if (pdataRva != 0 && pdataSize != 0) {
+                    for (auto* sec : m_sections) {
+                        if (pdataRva >= sec->VirtualAddress && 
+                            pdataRva < sec->VirtualAddress + sec->VirtualSize) {
+                            uint32_t fileOff = sec->PointerToRawData + (pdataRva - sec->VirtualAddress);
+                            if (fileOff + pdataSize <= m_rawBinary.size()) {
+                                struct RF { uint32_t Begin, End, Unwind; };
+                                uint32_t pos = fileOff;
+                                while (pos + sizeof(RF) <= fileOff + pdataSize) {
+                                    auto* rf = reinterpret_cast<const RF*>(&m_rawBinary[pos]);
+                                    if (rf->Begin != 0 && rf->End > rf->Begin) {
+                                        ctx.functionBoundaries.push_back({rf->Begin, rf->End});
+                                        
+                                        // Check if this function has exception handlers or chained unwind info
+                                        if (rf->Unwind != 0) {
+                                            uint32_t unwRva = rf->Unwind;
+                                            for (auto* sec2 : m_sections) {
+                                                if (unwRva >= sec2->VirtualAddress && 
+                                                    unwRva < sec2->VirtualAddress + sec2->VirtualSize) {
+                                                    uint32_t unwFileOffset = sec2->PointerToRawData + (unwRva - sec2->VirtualAddress);
+                                                    if (unwFileOffset + 4 <= m_rawBinary.size()) {
+                                                        uint8_t verFlags = m_rawBinary[unwFileOffset];
+                                                        uint8_t flags = verFlags >> 3;
+                                                         if (flags != 0) {
+                                                             ctx.exceptionHandlerFuncRVAs.insert(rf->Begin);
+                                                         }
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    pos += sizeof(RF);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            std::cout << "[DEBUG] Loaded " << ctx.functionBoundaries.size() << " function boundaries from .pdata." << std::endl;
+            std::cout << "[DEBUG] Found " << ctx.exceptionHandlerFuncRVAs.size() << " functions with exception handlers." << std::endl;
+
+            // 1. Disassemble the raw section bytes into the unified InstructionBlock once!
+            // Guide disassembly by function boundaries to keep decoder synchronized and skip padding/data!
+            InstructionBlock irBlock;
+            ZydisDecoder decoder;
+            ZydisMachineMode mode = m_is64Bit ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LONG_COMPAT_32;
+            ZydisStackWidth stackWidth = m_is64Bit ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32;
+            if (ZYAN_SUCCESS(ZydisDecoderInit(&decoder, mode, stackWidth))) {
+                // Sort boundaries by begin RVA
+                std::vector<std::pair<uint32_t, uint32_t>> sortedBoundaries = ctx.functionBoundaries;
+                std::sort(sortedBoundaries.begin(), sortedBoundaries.end(), [](const auto& a, const auto& b) {
+                    return a.first < b.first;
+                });
+                
+                size_t offset = 0;
+                ZydisDecodedInstruction ins;
+                ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+                
+                if (!sortedBoundaries.empty()) {
+                    for (const auto& func : sortedBoundaries) {
+                        uint32_t funcBeginOffset = func.first - baseAddress;
+                        uint32_t funcEndOffset = func.second - baseAddress;
+                        
+                        // Copy any bytes before the function as raw unmutated data (e.g. padding/constants)
+                        while (offset < funcBeginOffset && offset < code.size()) {
+                            IRInstruction inst;
+                            inst.rva = baseAddress + offset;
+                            inst.original_bytes = { code[offset] };
+                            inst.is_terminator = false;
+                            inst.is_rip_relative = false;
+                            irBlock.push_back(inst);
+                            offset++;
+                        }
+                        
+                        // Disassemble the function instructions in sync
+                        while (offset < funcEndOffset && offset < code.size()) {
+                            ZyanStatus status = ZydisDecoderDecodeFull(&decoder, &code[offset], code.size() - offset, &ins, operands);
+                            IRInstruction inst;
+                            inst.rva = baseAddress + offset;
+                            
+                            if (!ZYAN_SUCCESS(status)) {
+                                inst.original_bytes = { code[offset] };
+                                inst.is_terminator = false;
+                                inst.is_rip_relative = false;
+                                offset++;
+                            } else {
+                                inst.raw = ins;
+                                std::copy(std::begin(operands), std::end(operands), std::begin(inst.operands));
+                                inst.original_bytes.assign(code.begin() + offset, code.begin() + offset + ins.length);
+                                
+                                inst.is_terminator = (ins.mnemonic == ZYDIS_MNEMONIC_RET || 
+                                                      ins.mnemonic == ZYDIS_MNEMONIC_JMP || 
+                                                      ins.mnemonic == ZYDIS_MNEMONIC_CALL || 
+                                                      (ins.mnemonic >= ZYDIS_MNEMONIC_JB && ins.mnemonic <= ZYDIS_MNEMONIC_JZ));
+                                
+                                inst.is_rip_relative = false;
+                                if (m_is64Bit) {
+                                    for (int opIdx = 0; opIdx < ins.operand_count; ++opIdx) {
+                                        if (operands[opIdx].type == ZYDIS_OPERAND_TYPE_MEMORY && 
+                                            operands[opIdx].mem.base == ZYDIS_REGISTER_RIP) {
+                                            inst.is_rip_relative = true;
+                                            inst.rip_relative_delta = ins.raw.disp.value;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // Populate branch relocation details
+                                for (int opIdx = 0; opIdx < 2; ++opIdx) {
+                                    if (ins.raw.imm[opIdx].size > 0 && ins.raw.imm[opIdx].is_relative) {
+                                        inst.branch_target_rva = inst.rva + ins.length + ins.raw.imm[opIdx].value.s;
+                                        inst.branch_offset = ins.raw.imm[opIdx].offset;
+                                        inst.branch_size = ins.raw.imm[opIdx].size / 8;
+                                        break;
+                                    }
+                                }
+                                offset += ins.length;
+                            }
+                            irBlock.push_back(inst);
+                        }
+                    }
+                }
+                
+                // Copy any remaining trailing bytes in the section
+                while (offset < code.size()) {
+                    IRInstruction inst;
+                    inst.rva = baseAddress + offset;
+                    inst.original_bytes = { code[offset] };
+                    inst.is_terminator = false;
+                    inst.is_rip_relative = false;
+                    irBlock.push_back(inst);
+                    offset++;
+                }
+            }
+            
+            // 2. Set up pipeline in PassManager
+            PassManager pm;
+            // Trace original RIP-relative instructions
+            for (const auto& inst : irBlock) {
+                if (inst.is_rip_relative && inst.rva >= 0x1000 && inst.rva <= 0x1200) {
+                    std::cout << "[ORIG_RIP] rva=0x" << std::hex << inst.rva << " bytes: ";
+                    for (auto b : inst.original_bytes) {
+                        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)b << " ";
+                    }
+                    std::cout << std::dec << std::endl;
+                }
             }
 
+            // Populate validInstructionRVAs for CodeReorderer safety checks
+            for (const auto& inst : irBlock) {
+                if (inst.rva != 0) {
+                    ctx.validInstructionRVAs.insert(inst.rva);
+                }
+            }
+            
+            if (m_isMetamorphic) {
+                auto metaPass = std::make_unique<MetamorphicEngine>(m_rng);
+                metaPass->SetPermutationLevel(m_permuteLevel);
+                metaPass->SetExpansionLevel(m_expandLevel);
+                metaPass->setGarbageLevel(m_garbageLevel);
+                metaPass->EnableLoopUnrolling(m_unrollLoops);
+                metaPass->EnableFunctionInlining(m_inlineFunctions);
+                metaPass->EnableOpaquePredicates(true);
+                metaPass->EnableBranchPrediction(true);
+                pm.Register(std::move(metaPass));
+            }
             if (m_substituteInstructions) {
-                m_impl->ApplyInstructionSubstitution(code);
+                pm.Register(std::make_unique<InstructionSubstitutor>(m_rng));
             }
-
-            if (m_randomizeRegisters) {
-                m_impl->ApplyRegisterRandomization(code);
-            }
-
-            if (m_reorderCode) {
-                m_impl->ApplyCodeReordering(code, m_functionBoundaries, baseAddress);
-            }
-
             if (m_insertJunkCode) {
-                m_impl->InsertJunkCode(code, baseAddress);
+                pm.Register(std::make_unique<JunkCodeInserter>(m_rng));
+            }
+            if (m_obfuscateControlFlow) {
+                pm.Register(std::make_unique<ControlFlowObfuscator>(m_rng));
+            }
+            if (m_reorderCode) {
+                pm.Register(std::make_unique<CodeReorderer>(m_rng));
+            }
+            if (m_randomizeRegisters) {
+                pm.Register(std::make_unique<RegisterRandomizer>(m_rng));
+            }
+            
+            // VerifierPass always runs last
+            pm.Register(std::make_unique<VerifierPass>());
+            
+            // 3. Run all passes
+            pm.RunAll(irBlock, ctx);
+            
+            // 4. Assemble/Re-emit once at the end!
+            std::vector<uint8_t> newCode;
+            
+            std::map<uint64_t, uint64_t> rvaMap;
+            uint64_t currentRva = baseAddress;
+            for (size_t k = 0; k < irBlock.size(); ++k) {
+                if (irBlock[k].rva != 0) {
+                    rvaMap[irBlock[k].rva] = currentRva;
+                }
+                const auto& bytes = irBlock[k].mutated_bytes.empty() ? irBlock[k].original_bytes : irBlock[k].mutated_bytes;
+                currentRva += bytes.size();
             }
 
-            if (m_obfuscateControlFlow) {
-                m_impl->ApplyControlFlowObfuscation(code, baseAddress);
+            uint32_t textStart = m_sections.empty() ? 0x1000 : m_sections[0]->VirtualAddress;
+            uint32_t textLimit = m_sections.size() > 1 ? m_sections[1]->VirtualAddress : 0xFFFFFFFF;
+
+            // Helper lambda for robust RVA mapping (pure RVA space, no ImageBase)
+            auto MapRVA = [&](uint32_t rva) -> uint32_t {
+                if (rva == 0) return 0;
+                if (rva < textStart || rva >= textLimit) {
+                    return rva;
+                }
+                if (rvaMap.count(rva)) {
+                    return static_cast<uint32_t>(rvaMap[rva]);
+                }
+                // Fallback: find the closest instruction RVA (upper_bound)
+                auto it = rvaMap.upper_bound(rva);
+                if (it != rvaMap.begin()) {
+                    --it;
+                    uint64_t origInstRva = it->first;
+                    uint64_t newInstRva = it->second;
+                    return static_cast<uint32_t>(newInstRva + (rva - origInstRva));
+                }
+                return rva;
+            };
+
+            // Strict RVA mapping (only if it is a known instruction start RVA)
+            auto MapRVAStrict = [&](uint32_t rva) -> uint32_t {
+                if (rva == 0) return 0;
+                if (rvaMap.count(rva)) {
+                    return static_cast<uint32_t>(rvaMap[rva]);
+                }
+                return rva;
+            };
+
+            // Custom end RVA mapping (maps end of function to newBegin + newSize)
+            auto MapEndRVA = [&](uint32_t beginRva, uint32_t endRva) -> uint32_t {
+                if (endRva == 0) return 0;
+                uint64_t maxNewEnd = 0;
+                for (const auto& inst : irBlock) {
+                    if (inst.rva >= beginRva && inst.rva < endRva) {
+                        if (rvaMap.count(inst.rva)) {
+                            uint64_t newInstRva = rvaMap[inst.rva];
+                            uint64_t newSize = inst.mutated_bytes.empty() ? inst.original_bytes.size() : inst.mutated_bytes.size();
+                            if (newInstRva + newSize > maxNewEnd) {
+                                maxNewEnd = newInstRva + newSize;
+                            }
+                        }
+                    }
+                }
+                if (maxNewEnd != 0) {
+                    return static_cast<uint32_t>(maxNewEnd);
+                }
+                return endRva;
+            };
+
+            // Update AddressOfEntryPoint if it was inside the modified section
+            uint32_t entryPoint = m_is64Bit ? 
+                (m_optionalHeader64 ? m_optionalHeader64->AddressOfEntryPoint : 0) :
+                (m_optionalHeader32 ? m_optionalHeader32->AddressOfEntryPoint : 0);
+            if (entryPoint != 0) {
+                uint32_t newEntryPoint = MapRVAStrict(entryPoint);
+                std::cout << "[DEBUG] EntryPoint original RVA: 0x" << std::hex << entryPoint 
+                          << ", new RVA: 0x" << newEntryPoint << std::dec << std::endl;
+                if (m_is64Bit && m_optionalHeader64) {
+                    m_optionalHeader64->AddressOfEntryPoint = newEntryPoint;
+                } else if (!m_is64Bit && m_optionalHeader32) {
+                    m_optionalHeader32->AddressOfEntryPoint = newEntryPoint;
+                }
             }
+
+            // Update x64 exception handling directory (.pdata) table entries
+            if (m_is64Bit && m_optionalHeader64) {
+                uint32_t exceptionRva = m_optionalHeader64->DataDirectory[3].VirtualAddress;
+                uint32_t exceptionSize = m_optionalHeader64->DataDirectory[3].Size;
+                if (exceptionRva != 0 && exceptionSize != 0) {
+                    IMAGE_SECTION_HEADER* exceptionSec = nullptr;
+                    for (auto* sec : m_sections) {
+                        if (exceptionRva >= sec->VirtualAddress && 
+                            exceptionRva < sec->VirtualAddress + sec->VirtualSize) {
+                            exceptionSec = sec;
+                            break;
+                        }
+                    }
+                    if (exceptionSec) {
+                        uint32_t fileOffset = exceptionSec->PointerToRawData + (exceptionRva - exceptionSec->VirtualAddress);
+                        if (fileOffset + exceptionSize <= m_rawBinary.size()) {
+                            struct RUNTIME_FUNCTION {
+                                uint32_t BeginAddress;
+                                uint32_t EndAddress;
+                                uint32_t UnwindInfoAddress;
+                            };
+                            
+                            std::vector<RUNTIME_FUNCTION> rfList;
+                            uint32_t pos = fileOffset;
+                            while (pos + sizeof(RUNTIME_FUNCTION) <= fileOffset + exceptionSize) {
+                                RUNTIME_FUNCTION* rf = reinterpret_cast<RUNTIME_FUNCTION*>(&m_rawBinary[pos]);
+                                
+                                if (rf->UnwindInfoAddress != 0) {
+                                    uint32_t unwRva = rf->UnwindInfoAddress;
+                                    IMAGE_SECTION_HEADER* unwSec = nullptr;
+                                    for (auto* sec : m_sections) {
+                                        if (unwRva >= sec->VirtualAddress && 
+                                            unwRva < sec->VirtualAddress + sec->VirtualSize) {
+                                            unwSec = sec;
+                                            break;
+                                        }
+                                    }
+                                    if (unwSec) {
+                                        uint32_t unwFileOffset = unwSec->PointerToRawData + (unwRva - unwSec->VirtualAddress);
+                                        if (unwFileOffset + 4 <= m_rawBinary.size()) {
+                                            uint8_t verFlags = m_rawBinary[unwFileOffset];
+                                            uint8_t flags = verFlags >> 3;
+                                            uint8_t countOfCodes = m_rawBinary[unwFileOffset + 2];
+                                            if ((flags & 3) != 0) {
+                                                uint32_t codesAligned = (countOfCodes + 1) & 0xFE;
+                                                uint32_t handlerOffset = unwFileOffset + 4 + (codesAligned * 2);
+                                                if (handlerOffset + 4 <= m_rawBinary.size()) {
+                                                    uint32_t* handlerRvaPtr = reinterpret_cast<uint32_t*>(&m_rawBinary[handlerOffset]);
+                                                    *handlerRvaPtr = MapRVAStrict(*handlerRvaPtr);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                 RUNTIME_FUNCTION mappedRf;
+                                 if (rvaMap.count(rf->BeginAddress)) {
+                                     mappedRf.BeginAddress = static_cast<uint32_t>(rvaMap[rf->BeginAddress]);
+                                     mappedRf.EndAddress = MapEndRVA(rf->BeginAddress, rf->EndAddress);
+                                 } else {
+                                     mappedRf.BeginAddress = rf->BeginAddress;
+                                     mappedRf.EndAddress = rf->EndAddress;
+                                 }
+                                 mappedRf.UnwindInfoAddress = rf->UnwindInfoAddress;
+                                 rfList.push_back(mappedRf);
+                                pos += sizeof(RUNTIME_FUNCTION);
+                            }
+                            
+                            // Sort the exception table by BeginAddress in ascending order
+                            std::sort(rfList.begin(), rfList.end(), [](const RUNTIME_FUNCTION& a, const RUNTIME_FUNCTION& b) {
+                                return a.BeginAddress < b.BeginAddress;
+                            });
+                            
+                            // Write the sorted table back to the binary
+                            pos = fileOffset;
+                            for (const auto& rf : rfList) {
+                                RUNTIME_FUNCTION* dest = reinterpret_cast<RUNTIME_FUNCTION*>(&m_rawBinary[pos]);
+                                *dest = rf;
+                                pos += sizeof(RUNTIME_FUNCTION);
+                            }
+                        }
+                    }
+                }
+            }
+
+            currentRva = baseAddress;
+            int shortBranchOverflows = 0;
+            int ripRefMismatches = 0;
+            for (size_t k = 0; k < irBlock.size(); ++k) {
+                auto& inst = irBlock[k];
+                auto bytes = inst.mutated_bytes.empty() ? inst.original_bytes : inst.mutated_bytes;
+                uint64_t nextRva = currentRva + bytes.size();
+                
+                // Patch branch target if present
+                if (inst.branch_target_rva != 0 && inst.branch_size > 0 && inst.branch_offset < bytes.size()) {
+                    uint64_t targetNewRva = inst.branch_target_rva;
+                    bool shouldPatch = true;
+                    if (rvaMap.count(inst.branch_target_rva)) {
+                        targetNewRva = rvaMap[inst.branch_target_rva];
+                    } else if (inst.branch_size == 1) {
+                        shouldPatch = false;
+                    }
+                    if (shouldPatch) {
+                        int64_t disp = static_cast<int64_t>(targetNewRva) - static_cast<int64_t>(nextRva);
+                        if (inst.branch_size == 1) {
+                            if (disp < -128 || disp > 127) {
+                                ++shortBranchOverflows;
+                                if (shortBranchOverflows <= 3) {
+                                    bool targetInMap = rvaMap.count(inst.branch_target_rva) > 0;
+                                    uint64_t origNewPos = 0;
+                                    if (rvaMap.count(inst.rva)) origNewPos = rvaMap[inst.rva];
+                                    std::cout << "[OVERFLOW#" << shortBranchOverflows
+                                              << "] src=0x" << std::hex << inst.rva
+                                              << " (now@0x" << currentRva << ")"
+                                              << " tgt=0x" << inst.branch_target_rva
+                                              << " (mapped=" << (targetInMap ? "yes" : "no")
+                                              << " newTgt=0x" << targetNewRva << ")"
+                                              << " disp=" << std::dec << disp << std::endl;
+                                }
+
+                            }
+                            bytes[inst.branch_offset] = static_cast<uint8_t>(disp & 0xFF);
+                        } else if (inst.branch_size == 4) {
+                            *reinterpret_cast<int32_t*>(&bytes[inst.branch_offset]) = static_cast<int32_t>(disp);
+                        }
+                    }
+                }
+                
+                // Patch RIP-relative memory displacements if present
+                if (inst.is_rip_relative && inst.raw.raw.disp.size > 0) {
+                    uint64_t origTargetVal = inst.rva + inst.raw.length + inst.rip_relative_delta;
+                    uint64_t newTargetVal = origTargetVal;
+                    if (rvaMap.count(origTargetVal)) {
+                        newTargetVal = rvaMap[origTargetVal];
+                    }
+                    int64_t newDisp = static_cast<int64_t>(newTargetVal) - static_cast<int64_t>(nextRva);
+                    if (newDisp < INT32_MIN || newDisp > INT32_MAX) {
+                        ++ripRefMismatches;
+                    }
+                    uint8_t dispOffset = inst.raw.raw.disp.offset;
+                    uint8_t dispSize = inst.raw.raw.disp.size / 8;
+                    
+                    if (inst.rva >= 0x1000 && inst.rva <= 0x1200) {
+                        std::cout << "[RIP_PATCH] rva=0x" << std::hex << inst.rva 
+                                  << " dispOffset=" << (int)dispOffset 
+                                  << " dispSize=" << (int)dispSize
+                                  << " original_bytes: ";
+                        for (auto b : inst.original_bytes) {
+                            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)b << " ";
+                        }
+                        std::cout << "newDisp=0x" << std::hex << newDisp << std::dec << std::endl;
+                    }
+
+                    if (dispOffset + dispSize <= bytes.size()) {
+                        if (dispSize == 1) {
+                            bytes[dispOffset] = static_cast<uint8_t>(newDisp & 0xFF);
+                        } else if (dispSize == 4) {
+                            *reinterpret_cast<int32_t*>(&bytes[dispOffset]) = static_cast<int32_t>(newDisp);
+                        }
+                    }
+                }
+                
+                newCode.insert(newCode.end(), bytes.begin(), bytes.end());
+                currentRva = nextRva;
+            }
+            if (shortBranchOverflows > 0) {
+                std::cout << "[WARN] " << shortBranchOverflows << " short-branch (rel8) OVERFLOWS after reorder!" << std::endl;
+            } else {
+                std::cout << "[DEBUG] No short-branch overflows. All rel8 targets in range." << std::endl;
+            }
+            if (ripRefMismatches > 0) {
+                std::cout << "[WARN] " << ripRefMismatches << " RIP-relative refs overflow int32_t after reorder!" << std::endl;
+            }
+            code = std::move(newCode);
 
             // Update section size if code expanded
             size_t newCodeSize = code.size();
+
             uint32_t fileAlign = GetFileAlignment();
             size_t newAlignedSize = (newCodeSize + fileAlign - 1) & ~(fileAlign - 1);
             size_t alignedCapacity = (size + fileAlign - 1) & ~(fileAlign - 1);
@@ -879,7 +1458,6 @@ namespace Polymorphic {
                 uint32_t diff = static_cast<uint32_t>(newAlignedSize - alignedCapacity);
                 
                 // Shift physical offsets of all sections starting after this one in the file
-                // we do this BEFORE insert while the pointers are valid!
                 for (auto* sec : m_sections) {
                     if (sec->PointerToRawData > start) {
                         sec->PointerToRawData += diff;
@@ -910,6 +1488,155 @@ namespace Polymorphic {
             std::copy(code.begin(), code.end(), m_rawBinary.begin() + start);
             section->SizeOfRawData = static_cast<uint32_t>(finalRawSize);
             section->VirtualSize = std::max(section->VirtualSize, static_cast<uint32_t>(newCodeSize));
+
+            // Fix relocations and rebuild the .reloc table
+            uint32_t relocRva = m_is64Bit ? 
+                (m_optionalHeader64 ? m_optionalHeader64->DataDirectory[5].VirtualAddress : 0) :
+                (m_optionalHeader32 ? m_optionalHeader32->DataDirectory[5].VirtualAddress : 0);
+            uint32_t relocSize = m_is64Bit ? 
+                (m_optionalHeader64 ? m_optionalHeader64->DataDirectory[5].Size : 0) :
+                (m_optionalHeader32 ? m_optionalHeader32->DataDirectory[5].Size : 0);
+
+            if (relocRva != 0 && relocSize != 0) {
+                IMAGE_SECTION_HEADER* relocSec = nullptr;
+                for (auto* sec : m_sections) {
+                    if (relocRva >= sec->VirtualAddress && 
+                        relocRva < sec->VirtualAddress + sec->VirtualSize) {
+                        relocSec = sec;
+                        break;
+                    }
+                }
+                if (relocSec) {
+                    uint32_t fileOffset = relocSec->PointerToRawData + (relocRva - relocSec->VirtualAddress);
+                    if (fileOffset + relocSize <= m_rawBinary.size()) {
+                        struct NewReloc {
+                            uint32_t rva;
+                            uint16_t type;
+                        };
+                        std::vector<NewReloc> allRelocs;
+                        
+                        size_t pos = fileOffset;
+                        while (pos < fileOffset + relocSize) {
+                            if (pos + sizeof(PE::IMAGE_BASE_RELOCATION) > fileOffset + relocSize) break;
+                            
+                            auto* reloc = reinterpret_cast<PE::IMAGE_BASE_RELOCATION*>(&m_rawBinary[pos]);
+                            if (reloc->VirtualAddress == 0) break;
+                            if (reloc->SizeOfBlock < sizeof(PE::IMAGE_BASE_RELOCATION)) break;
+                            
+                            uint32_t numEntries = (reloc->SizeOfBlock - sizeof(PE::IMAGE_BASE_RELOCATION)) / 2;
+                            uint16_t* entries = reinterpret_cast<uint16_t*>(&m_rawBinary[pos + sizeof(PE::IMAGE_BASE_RELOCATION)]);
+                            
+                            uint32_t oldPageRva = reloc->VirtualAddress;
+                            
+                            for (uint32_t i = 0; i < numEntries; ++i) {
+                                uint16_t entry = entries[i];
+                                uint16_t type = (entry >> 12) & 0xF;
+                                uint16_t offset = entry & 0xFFF;
+                                
+                                if (type != 0) {
+                                    uint32_t origRva = oldPageRva + offset;
+                                    uint32_t newRva = MapRVA(origRva);
+                                    allRelocs.push_back({ newRva, type });
+                                    
+                                    IMAGE_SECTION_HEADER* targetSec = nullptr;
+                                    for (auto* sec : m_sections) {
+                                        if (newRva >= sec->VirtualAddress && 
+                                            newRva < sec->VirtualAddress + sec->VirtualSize) {
+                                            targetSec = sec;
+                                            break;
+                                        }
+                                    }
+                                    if (targetSec) {
+                                        uint32_t targetFileOffset = targetSec->PointerToRawData + (newRva - targetSec->VirtualAddress);
+                                        uint64_t imgBase = imageBase;
+                                            
+                                        if (type == 3 && targetFileOffset + 4 <= m_rawBinary.size()) {
+                                            uint32_t* addr = reinterpret_cast<uint32_t*>(&m_rawBinary[targetFileOffset]);
+                                            uint32_t oldValue = *addr;
+                                            if (oldValue >= imgBase && oldValue < imgBase + 0xFFFFFFFF) {
+                                                uint32_t valRva = static_cast<uint32_t>(oldValue - imgBase);
+                                                *addr = static_cast<uint32_t>(imgBase + MapRVA(valRva));
+                                            } else {
+                                                *addr = MapRVA(oldValue);
+                                            }
+                                        }
+                                        else if (type == 10 && targetFileOffset + 8 <= m_rawBinary.size()) {
+                                            uint64_t* addr64 = reinterpret_cast<uint64_t*>(&m_rawBinary[targetFileOffset]);
+                                            uint64_t oldValue64 = *addr64;
+                                            if (oldValue64 >= imgBase) {
+                                                uint64_t valRva = oldValue64 - imgBase;
+                                                *addr64 = imgBase + MapRVA(static_cast<uint32_t>(valRva));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            pos += reloc->SizeOfBlock;
+                        }
+                        
+                        std::sort(allRelocs.begin(), allRelocs.end(), [](const NewReloc& a, const NewReloc& b) {
+                            return a.rva < b.rva;
+                        });
+                        
+                        std::map<uint32_t, std::vector<uint16_t>> pageRelocs;
+                        for (const auto& r : allRelocs) {
+                            uint32_t pageRva = r.rva & ~0xFFF;
+                            uint16_t offset = r.rva & 0xFFF;
+                            pageRelocs[pageRva].push_back((r.type << 12) | offset);
+                        }
+                        
+                        std::vector<uint8_t> newRelocData;
+                        for (auto const& [pageRva, entries] : pageRelocs) {
+                            size_t startOffset = newRelocData.size();
+                            newRelocData.resize(startOffset + sizeof(PE::IMAGE_BASE_RELOCATION));
+                            
+                            auto* hdr = reinterpret_cast<PE::IMAGE_BASE_RELOCATION*>(&newRelocData[startOffset]);
+                            hdr->VirtualAddress = pageRva;
+                            
+                            size_t numEntries = entries.size();
+                            size_t paddedEntries = (numEntries % 2 != 0) ? (numEntries + 1) : numEntries;
+                            hdr->SizeOfBlock = static_cast<uint32_t>(sizeof(PE::IMAGE_BASE_RELOCATION) + paddedEntries * 2);
+                            
+                            for (auto entry : entries) {
+                                uint8_t bytes[2];
+                                bytes[0] = entry & 0xFF;
+                                bytes[1] = (entry >> 8) & 0xFF;
+                                newRelocData.insert(newRelocData.end(), bytes, bytes + 2);
+                            }
+                            if (numEntries % 2 != 0) {
+                                uint8_t bytes[2] = {0, 0};
+                                newRelocData.insert(newRelocData.end(), bytes, bytes + 2);
+                            }
+                        }
+                        
+                        if (newRelocData.size() <= relocSec->SizeOfRawData) {
+                            std::copy(newRelocData.begin(), newRelocData.end(), m_rawBinary.begin() + fileOffset);
+                            std::memset(m_rawBinary.data() + fileOffset + newRelocData.size(), 0, relocSec->SizeOfRawData - newRelocData.size());
+                        } else {
+                            size_t fileAlign = GetFileAlignment();
+                            size_t newAlignedSize = (newRelocData.size() + fileAlign - 1) & ~(fileAlign - 1);
+                            size_t diff = newAlignedSize - relocSec->SizeOfRawData;
+                            
+                            m_rawBinary.insert(m_rawBinary.begin() + fileOffset + relocSec->SizeOfRawData, diff, 0);
+                            
+                            ParsePE();
+                            relocSec = m_sections.back();
+                            
+                            std::copy(newRelocData.begin(), newRelocData.end(), m_rawBinary.begin() + fileOffset);
+                            std::memset(m_rawBinary.data() + fileOffset + newRelocData.size(), 0, newAlignedSize - newRelocData.size());
+                            
+                            relocSec->SizeOfRawData = static_cast<uint32_t>(newAlignedSize);
+                            relocSec->VirtualSize = std::max(relocSec->VirtualSize, static_cast<uint32_t>(newRelocData.size()));
+                        }
+                        
+                        if (m_is64Bit && m_optionalHeader64) {
+                            m_optionalHeader64->DataDirectory[5].Size = static_cast<uint32_t>(newRelocData.size());
+                        } else if (!m_is64Bit && m_optionalHeader32) {
+                            m_optionalHeader32->DataDirectory[5].Size = static_cast<uint32_t>(newRelocData.size());
+                        }
+                    }
+                }
+            }
         }
 
         // Apply data transformations
@@ -940,6 +1667,11 @@ namespace Polymorphic {
         if (m_obfuscateImports) {
             m_impl->ObfuscateImports();
             ParsePE(); // Refresh all pointers just in case ObfuscateImports modified the PE layout
+        }
+        
+        if (m_encryptPayload) {
+            m_impl->EncryptPayload();
+            ParsePE();
         }
 
         return RebuildPE();

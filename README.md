@@ -69,28 +69,35 @@ The engine features two distinct modes of transformation which can be combined (
     *   `XOR reg, reg` $\rightarrow$ `SUB reg, reg`
     *   `NOP` $\rightarrow$ `PUSH RBX; POP RBX` or `XCHG RAX, RAX`
     *   *x64 Safety Filter*: Automatically bypasses single-byte legacy `INC` (`0x40`) / `DEC` (`0x48`) substitutions on x64 targets to prevent collisions with the REX prefix byte range (`0x40-0x4F`).
+    *   *Width Guards*: Substitutions for `ADD reg, 1 → INC reg`, `SUB reg, 1 → DEC reg`, and `CMP reg, 0 → TEST reg, reg` are restricted to 32-bit and 64-bit operand sizes only, preventing flag corruption on 8-bit/16-bit registers.
+    *   *REX Prefix Scan*: The `LEA reg, [reg] → MOV reg, reg` substitution correctly skips legacy prefixes before checking for a valid REX prefix byte (`0x40–0x4F`) in 64-bit mode, preserving both legacy and REX prefixes to avoid encoding corruption.
 *   **Register Randomizer**: Dynamically re-maps general-purpose register usage while adhering to strict architecture constraints:
     *   *Calling Convention Safe*: Preserves caller/callee boundary registers `RAX/EAX` (return values), `RCX/ECX, RDX/EDX, R8, R9` (arguments), `RSP/ESP, RBP/EBP` (stack frames), and `R12, R13` (special SIB addresses).
     *   *Partitioned Shuffle*: Safely shuffles registers only within legacy (`RBX, RSI, RDI`) and extension (`R10, R11, R14, R15`) groups, guaranteeing that instruction lengths and REX prefix status remain completely invariant.
     *   *Dynamic Implicit-Register Scan*: Decodes instruction operands to automatically detect and exclude implicit registers (e.g., EAX/EDX in division, or ESI/EDI/RSI/RDI in string operations) to prevent semantic corruption.
     *   *RIP-Relative Safe-guard*: Automatically bypasses register randomization on instructions containing RIP-relative or EIP-relative displacement addressing to maintain correct relative memory references.
 *   **Import Obfuscation**: Erases the original Import Address Table (IAT) names and replaces them with dynamically generated import resolution stubs:
-    *   *x86 targets*: Walks the 32-bit PEB loader lists via `FS:[0x30]` to locate module bases and resolves API addresses at runtime using `ROR13` hashing.
-    *   *x64 targets*: Walk the 64-bit PEB via `GS:[0x60]`, implements full Microsoft x64 calling conventions with 32-byte stack shadow space allocation, and utilizes RIP-relative addressing to locate string table offsets.
-*   **Exception Directory Relocation**: Automatically parses x64 `.pdata` runtime function tables and `UNWIND_INFO` structures to relocate 32-bit exception handler RVAs when shuffling or renaming PE sections.
-*   **Code Reordering (x86/x64)**: Partitions code into basic blocks, shuffles their location, and maintains original execution flow by stitching blocks together with JMP instructions. Zydis is used to parse branch offsets and relative memory displacements to patch targets.
-*   **Junk Code Inserter (x86/x64)**: Inserts context-aware, benign junk instructions (e.g., flag-safe operations) to modify byte signatures without changing execution behavior. Filters out x86-only instructions on x64.
-*   **Control Flow Obfuscation (x86/x64)**: Distorts control flow by replacing jumps with equivalent joint condition pairs (e.g., `JO` + `JNO`) and Jcc conditions with inverted Jcc skips.
-*   **Payload Encryption**: Encrypts target payload sections (XOR, etc.) and injects dynamically generated decryptor stubs as the entry point. On x64 targets, stubs query the Process Environment Block (PEB) using `GS:[0x60]` (instead of `FS:[0x30]` on x86) for anti-debug analysis.
+    *   *x86 targets*: Walks the 32-bit PEB `InMemoryOrderModuleList` via `FS:[0x30]`, uppercase case-folds Unicode `BaseDllName` characters, and resolves API addresses at runtime using a `ROR13-ADD` hash. The precomputed hash `0x6E2BCA17` identifies `KERNEL32.DLL` robustly regardless of module load order.
+    *   *x64 targets*: Walks the 64-bit PEB `InMemoryOrderModuleList` via `GS:[0x60]`, implements full Microsoft x64 calling conventions with 32-byte stack shadow space allocation, and utilizes RIP-relative addressing to locate string table offsets.
+*   **Exception Directory Relocation**: Automatically parses x64 `.pdata` runtime function tables and `UNWIND_INFO` structures to relocate 32-bit exception handler RVAs when shuffling or renaming PE sections. A `MapEndRVA` range helper correctly recalculates `EndAddress` for functions that grew in size during metamorphic transformation.
+*   **Code Reordering (x86/x64)**: Groups functions by exact byte size and performs size-matched in-place swaps rather than appending to separate lists. This guarantees that every function's RVA — including those not being shuffled — remains identical to its original value, keeping `.rdata` switch-case jump tables correct while still randomizing thousands of same-sized functions. Zydis is used to parse branch offsets and relative memory displacements to patch targets.
+*   **Junk Code Inserter (x86/x64)**: Inserts context-aware, benign junk instructions (e.g., flag-safe operations) to modify byte signatures without changing execution behavior. Stack pointer (`ESP`/`RSP`) and frame pointer (`EBP`/`RBP`) registers are explicitly excluded from the junk clobber mask using named Zydis register constants, preventing stack/frame corruption. Filters out x86-only instructions on x64.
+*   **Control Flow Obfuscation (x86/x64)**: Distorts control flow by replacing jumps with equivalent joint condition pairs (e.g., `JO` + `JNO`) and Jcc conditions with inverted Jcc skips. All short jumps are expanded to near Jcc instructions with 4-byte displacements to eliminate offset overflow.
+*   **Payload Encryption**: Encrypts target payload sections (XOR, etc.) and injects dynamically generated decryptor stubs as the entry point. Decryptor stub displacement offsets are calculated dynamically relative to the actual `POP` instruction address rather than using hardcoded values, ensuring correctness regardless of the size of any preceding anti-debug or anti-emulation stubs. On x64 targets, stubs use RIP-relative LEA instructions; on x86 targets, a call-pop GetPC technique is used.
 *   **Data Encoding**: Encodes static data strings using XOR, Base64, or string-splitting to avoid detection of plaintext strings.
 
 ### 2. Metamorphic Transformations
+
+The `MetamorphicEngine` runs **first** in the `PassManager` pipeline, before any other passes (such as `CodeReorderer`) shuffle instructions. This ordering ensures that control-flow disassembly and jump displacement decoding are always performed on instructions in their original layout.
+
 *   **Zydis Intermediate Representation**: Disassembles and decodes target functions to an IR, rewriting displacements and `%rip`-relative displacements to patch jump offsets and relocations on mutations.
 *   **Instruction Permutation (x86/x64)**: Alters instruction positions using Bernstein's data dependency conditions (RAW, WAR, WAW) while preserving stack frame layout registers (`RSP`, `ESP`, `RBP`, `EBP`).
-*   **Code Expansion**: Expands instructions to multi-byte equivalents to vary executable sizing.
+*   **Code Expansion**: Expands instructions to multi-byte equivalents to vary executable sizing. A dynamic `maxRawSize` headroom limit (8 KB) is reserved per `.text` section to prevent size growth from overlapping adjacent sections.
+*   **Localized Short Branch Expansion**: Short branch expansion is applied only inside `MetamorphicEngine::DisassembleToIR`, scoped to functions actually undergoing metamorphic transformation. This prevents excessive binary size growth from pre-emptive expansion across the entire code section.
 *   **Loop Unrolling & Function Inlining**: Modifies the stack frame structure and execution sequence by eliminating calls and branches.
 *   **Anti-Debugging / Anti-Emulation**: Integrates stubs to detect hypervisors, sandboxes, and debuggers (e.g., PEB checks, timing checks).
 *   **FileAlignment Section Resizing**: Safely pads, resizes, and aligns raw PE section size growth to `FileAlignment` boundaries, automatically relocating the COFF symbol table to prevent symbol warnings or image loaders crash.
+*   **Relocation Table Rebuilding**: Uses `MapRVA` (rather than `MapRVAStrict`) for mid-instruction base relocs pointing to absolute addresses, constrained to only shift RVAs within the `.text` section. This prevents corruption of relocations in `.data`, `.rdata`, or import sections.
 
 ---
 
@@ -264,7 +271,7 @@ graph TD
 2.  **Code Analysis & Disassembly**:
     Parses machine code instructions, determines byte length boundary offsets, identifies branches (jumps, calls), and isolates independent execution blocks (Basic Blocks).
 3.  **Applying Mutations**:
-    Runs the pipeline of selected obfuscation passes. The engine tracks offset modifications since instruction substitution, junk insertion, and block shuffling alter virtual addresses (RVAs).
+    Runs the pipeline of selected obfuscation passes. `MetamorphicEngine` is always invoked first so that disassembly and jump displacement decoding operate on the original instruction layout before any reordering or substitution passes shift RVAs. The engine tracks offset modifications since instruction substitution, junk insertion, and block shuffling alter virtual addresses (RVAs).
 4.  **Header Reconstruction & Rebuilding**:
     Adjusts relocations, recalculates Entry Point (OEP), shifts Section Headers offsets, fixes the Import Address Table (IAT) pointers, generates dynamic import-resolving stubs, computes a new PE checksum, and saves the new output binary.
 
@@ -338,7 +345,7 @@ Applies instruction substitutions, register randomization, code reordering, and 
   * `--polymorphic`: Activates the polymorphic transformation pipeline.
   * `--substitution`: Replaces common instruction patterns with equivalent sequences.
   * `--registers`: Randomizes general-purpose register usage safely.
-  * `--reorder`: Partitions code into basic blocks and shuffles them, adding stitching jumps.
+  * `--reorder`: Partitions code into size-matched function groups and shuffles them in-place, preserving all RVAs while maximizing randomization.
   * `--sections`: Randomizes PE section names and structural layout.
 
 #### 3. Advanced Metamorphic Obfuscation
@@ -358,7 +365,18 @@ Applies aggressive code expansion, high complexity instruction permutations, loo
   * `--unroll`: Enables optimization loop unrolling.
   * `--inline`: Inlines function calls where safe.
 
-#### 4. Mixed Maximum Protection (Combined Pipeline)
+#### 4. Full Polymorphic Suite
+Combines all polymorphic passes simultaneously for maximum coverage.
+* **Windows (PowerShell)**:
+  ```powershell
+  .\makne.exe input.exe output.exe --polymorphic --substitution --registers --reorder --junk --cflow --encrypt --imports
+  ```
+* **Linux / macOS**:
+  ```bash
+  ./makne input.exe output.exe --polymorphic --substitution --registers --reorder --junk --cflow --encrypt --imports
+  ```
+
+#### 5. Mixed Maximum Protection (Combined Pipeline)
 Combines all metamorphic and polymorphic features, flattens control flow, obfuscates import tables, encodes static strings, adds anti-analysis/debugger/emulation checks, and runs multiple passes.
 * **Windows (PowerShell)**:
   ```powershell
@@ -372,7 +390,7 @@ Combines all metamorphic and polymorphic features, flattens control flow, obfusc
   * `--mixed`: Runs both the polymorphic and metamorphic pipelines sequentially.
   * `--cflow`: Distorts control flow via dispatchers and opaque predicates.
   * `--encrypt`: Encrypts target sections and inserts a decryption stub at the entry point.
-  * `--imports`: Obfuscates the Import Address Table (IAT) and dynamically resolves DLLs.
+  * `--imports`: Obfuscates the Import Address Table (IAT) and dynamically resolves DLLs via PEB walking.
   * `--data`: Encodes static strings (XOR/Base64/splitting).
   * `--antidebug` & `--antiemu`: Injects checks to detect debuggers, hypervisors, and sandboxes.
   * `--level 5`: Sets global intensity to maximum (5).

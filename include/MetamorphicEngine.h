@@ -1,17 +1,23 @@
 // src/MetamorphicEngine.h
 #pragma once
 #include "PolymorphicEngine.h"
+#include "ObfuscationPass.h"
 #include <memory>
 
 namespace Polymorphic {
 
 // Metamorphic engine - rewrites code completely while preserving semantics
-class MetamorphicEngine {
+class MetamorphicEngine : public IObfuscationPass {
 public:
     MetamorphicEngine(CryptoRandom& rng);
     ~MetamorphicEngine();
     
-    // Full code metamorphosis
+    // IObfuscationPass interface
+    void Run(InstructionBlock& block, ArchContext& ctx) override;
+    std::string Name() const override { return "MetamorphicEngine"; }
+    bool ValidateOutput(const InstructionBlock& block) const override;
+    
+    // Full code metamorphosis (legacy API compatibility)
     bool Transform(std::vector<uint8_t>& code, uint32_t baseAddress);
     
     // Set transformation levels
@@ -44,6 +50,10 @@ private:
     // Intermediate representation
     class IR;
     std::unique_ptr<IR> m_ir;
+    
+    // Original function block tracking
+    const InstructionBlock* m_funcBlock = nullptr;
+    std::vector<size_t> m_funcOffsets;
     
     // Transformation passes
     void DisassembleToIR(const std::vector<uint8_t>& code, uint32_t baseAddress);

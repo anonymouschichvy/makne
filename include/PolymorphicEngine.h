@@ -160,6 +160,14 @@ namespace Polymorphic {
         void SetImportObfuscation(bool enable) { m_obfuscateImports = enable; }
         void SetAntiDebug(bool enable) { m_antiDebug = enable; }
 
+        // Metamorphic configuration
+        void SetMetamorphic(bool enable) { m_isMetamorphic = enable; }
+        void SetPermutationLevel(int level) { m_permuteLevel = level; }
+        void SetExpansionLevel(int level) { m_expandLevel = level; }
+        void SetGarbageLevel(int level) { m_garbageLevel = level; }
+        void EnableLoopUnrolling(bool enable) { m_unrollLoops = enable; }
+        void EnableFunctionInlining(bool enable) { m_inlineFunctions = enable; }
+
     private:
         // Core data
         std::vector<uint8_t> m_rawBinary;
@@ -185,6 +193,14 @@ namespace Polymorphic {
         bool m_randomizeSections;
         bool m_obfuscateImports;
         bool m_antiDebug;
+
+        // Metamorphic configuration flags
+        bool m_isMetamorphic;
+        int m_permuteLevel;
+        int m_expandLevel;
+        int m_garbageLevel;
+        bool m_unrollLoops;
+        bool m_inlineFunctions;
 
         // Random generator
         CryptoRandom m_rng;

