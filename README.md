@@ -58,6 +58,121 @@ makne/
 
 ---
 
+### Execution Flow
+
+This document details the step-by-step binary-level mutation, encryption, and obfuscation pipeline of the **`makne`** framework. It maps the conceptual execution flow directly to the project's C++ classes and source files, and explains how to configure or extend the pipeline to achieve nested multi-layered encryption. The diagram below illustrates the target obfuscation design. **Red** indicates the RC4-encrypted layer, and **Blue** denotes the Random Block Cipher-encrypted layer. Dashed lines inside a box indicate component boundaries within the encrypted payload.
+
+```mermaid
+flowchart LR
+    %% Global styling
+    classDef default fill:#FFFFFF,stroke:#333333,stroke-width:1.5px,color:#000000;
+    classDef decryptor fill:#F4F4F9,stroke:#333333,stroke-dasharray: 0;
+
+    %% STATE 1: Raw Payload
+    subgraph State1 ["1. Raw Payload"]
+        direction TB
+        s1_payload["Payload"]
+    end
+
+    %% STATE 2: Optional Loader Add
+    subgraph State2 ["2. Payload + Loader"]
+        direction TB
+        s2_payload["Payload"]
+        s2_loader["Loader"]
+        s2_payload --- s2_loader
+    end
+
+    %% STATE 3: Garbage Stub Add
+    subgraph State3 ["3. Obfuscated Stack"]
+        direction TB
+        s3_garbage["Garbage Stub"]
+        s3_payload["Payload"]
+        s3_loader["Loader"]
+        s3_garbage --- s3_payload
+        s3_payload --- s3_loader
+    end
+
+    %% STATE 4: RC4 Encryption
+    subgraph State4 ["4. RC4 Encrypted"]
+        direction TB
+        s4_decryptor["RC4 Decryptor"]
+        subgraph State4_RC4 ["RC4 Encrypted Block"]
+            direction TB
+            s4_garbage["Garbage Stub"]
+            s4_payload["Payload"]
+            s4_loader["Loader"]
+            s4_garbage -.- s4_payload
+            s4_payload -.- s4_loader
+        end
+        s4_decryptor === State4_RC4
+    end
+
+    %% STATE 5: Block Cipher Encryption
+    subgraph State5 ["5. Block Cipher Encrypted"]
+        direction TB
+        subgraph State5_Block ["Random Block Cipher Encrypted"]
+            direction TB
+            s5_decryptor["RC4 Decryptor"]
+            subgraph State5_RC4 ["RC4 Encrypted Block"]
+                direction TB
+                s5_garbage["Garbage Stub"]
+                s5_payload["Payload"]
+                s5_loader["Loader"]
+                s5_garbage -.- s5_payload
+                s5_payload -.- s5_loader
+            end
+            s5_decryptor === State5_RC4
+        end
+        s5_bc_decryptor["Block Cipher Decryptor"]
+        State5_Block === s5_bc_decryptor
+    end
+
+    %% STATE 6: Final Obfuscated Executable
+    subgraph State6 ["6. Final Payload"]
+        direction TB
+        s6_garbage_outer["Garbage Stub"]
+        subgraph State6_Block ["Random Block Cipher Encrypted"]
+            direction TB
+            s6_decryptor["RC4 Decryptor"]
+            subgraph State6_RC4 ["RC4 Encrypted Block"]
+                direction TB
+                s6_garbage["Garbage Stub"]
+                s6_payload["Payload"]
+                s6_loader["Loader"]
+                s6_garbage -.- s6_payload
+                s6_payload -.- s6_loader
+            end
+            s6_decryptor === State6_RC4
+        end
+        s6_bc_decryptor["Block Cipher Decryptor"]
+        s6_garbage_outer === State6_Block
+        State6_Block === s6_bc_decryptor
+    end
+
+    %% State Transitions (with arrows)
+    State1 ==> |"Optional Loader"| State2
+    State2 ==> |"Garbage Stub"| State3
+    State3 ==> |"RC4 Cipher"| State4
+    State4 ==> |"Random Block Cipher"| State5
+    State5 ==> |"Garbage Stub"| State6
+
+    %% Color styling matching the original diagram
+    style State4_RC4 stroke:#FF3333,stroke-width:2.5px,fill:#FFF8F8
+    style State5_RC4 stroke:#FF3333,stroke-width:2.5px,fill:#FFF8F8
+    style State6_RC4 stroke:#FF3333,stroke-width:2.5px,fill:#FFF8F8
+    
+    style State5_Block stroke:#3333FF,stroke-width:2.5px,fill:#F8F8FF
+    style State6_Block stroke:#3333FF,stroke-width:2.5px,fill:#F8F8FF
+    
+    style s4_decryptor fill:#F4F4F9,stroke:#333333
+    style s5_decryptor fill:#F4F4F9,stroke:#333333
+    style s6_decryptor fill:#F4F4F9,stroke:#333333
+    style s5_bc_decryptor fill:#F4F4F9,stroke:#333333
+    style s6_bc_decryptor fill:#F4F4F9,stroke:#333333
+```
+
+---
+
 ## 🛠 Features & Capabilities
 
 The engine features two distinct modes of transformation which can be combined (Mixed Mode):
